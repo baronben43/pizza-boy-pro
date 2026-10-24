@@ -41,6 +41,11 @@ One **▶ Run dailies** button (🎃 PBP Dailies, bottom-right on any `/hallowee
 ## Safety nets
 Per-activity visit guard (skips an activity that keeps reloading), "odd page" counters (an unrecognised page logs its text and moves on), shop buyer only acts on the shop it navigated to, Stop button aborts every wait.
 
+## To build next (1.0.2) — agreed with Ben, not yet built
+- **Hunt plays twice a day** for Ben (1.0.1 wrongly stops after one): play until "You may need a special item", safety cap 3
+- **Hunt win popup pinned:** `#prize_popup`, header `<h3>You find...</h3>`, body `.popup-body__2020` has `<img src=…items/….gif>` then "Haunted Salad has been added to your inventory!" → item = text before " has been added". "Nothing to collect" popup unchanged
+- Before building, ask Ben if there's anything else to include
+
 ## Next session — what to collect from Ben's first live run
 1. **Diagnose DOM** (panel button, copies page + run state) on any step that misbehaves
 2. Unseen pages: Grave Danger return/claim, Apple Bobbing prize popup, scratchcard win, Hunt win popup, Esophagor/Edna "done for today"
