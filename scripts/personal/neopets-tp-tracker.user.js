@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neopets Trading Post Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.34.0
+// @version      2.34.1
 // @description  Track items you buy at the Trading Post and user shops for reselling, sales of your own lots, plus a watchlist for lots and items you didn't buy. Personal build: the Lister (Listings tab) lists items on the TP, relists lots, puts items up for auction, relists unsold ones and logs auction sales.
 // @author       You
 // @match        https://www.neopets.com/island/tradingpost.phtml*
@@ -5258,7 +5258,14 @@
     if (!lotP) return null;
     const items = [...card.querySelectorAll('p.item-name-text')].map(n => {
       const r = n.nextElementSibling;
-      return { name: n.textContent.trim(), rarity: r && r.tagName === 'P' ? r.textContent.trim() : '' };
+      // Quantity badge (.item-count) sits on the item image in the same row —
+      // walk up from the name until a parent holds one, stopping at the card.
+      let qty = 1;
+      for (let el = n.parentElement; el && el !== card; el = el.parentElement) {
+        const c = el.querySelector('.item-count');
+        if (c) { qty = parseInt(c.textContent.replace(/\D/g, ''), 10) || 1; break; }
+      }
+      return { name: n.textContent.trim(), qty, rarity: r && r.tagName === 'P' ? r.textContent.trim() : '' };
     }).filter(i => i.name);
     const postedP = ps.find(p => /^Posted\b/i.test(p.textContent.trim()));
     const wishEl = card.querySelector('p.wishlist-text');
@@ -5300,7 +5307,7 @@
         const keepOld = c.truncated && prev.items && prev.items.length > c.items.length;
         cache[c.lot] = {
           ...rest,
-          items: keepOld ? prev.items : c.items.map(i => ({ name: i.name, qty: 1, rarity: i.rarity })),
+          items: keepOld ? prev.items : c.items.map(i => ({ name: i.name, qty: i.qty || 1, rarity: i.rarity })),
           truncated: keepOld ? !!prev.truncated : c.truncated,
           ib: c.ib,
           wishlist: c.wishlist,
