@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neopets Trading Post Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.35.0
+// @version      2.35.1
 // @description  Track items you buy at the Trading Post and user shops for reselling, sales of your own lots, plus a watchlist for lots and items you didn't buy. Personal build: the Lister (Listings tab) lists items on the TP, relists lots, puts items up for auction, relists unsold ones and logs auction sales.
 // @author       You
 // @match        https://www.neopets.com/island/tradingpost.phtml*
@@ -5592,6 +5592,7 @@
         ${gone.length ? `
           <div class="np-pnl-section-title" style="margin-top:6px">No longer listed (${gone.length})</div>
           <div class="np-muted np-offer-gone-note">Gone from Your Trades without a sale popup. ✅ Sold records it (instant-buy or wishlist price, or the price you enter); ↩ Cancelled just archives it.</div>
+          ${gone.length > 1 ? `<div class="np-watch-actions" style="margin-bottom:8px"><button class="np-watch-act" data-lact="cancelall" data-lot="" title="None of these sold — archive them all as cancelled (Tracker rows aren't changed)">↩ Cancel all ${gone.length}</button></div>` : ''}
           ${gone.map(l => card(l, 'gone')).join('')}` : ''}
         ${closed.length ? `
           <div class="np-pnl-section-title" style="margin-top:10px">Sold &amp; cancelled (${closed.length})</div>
@@ -5669,6 +5670,18 @@
       if (b && b.dataset.lact === 'price') { refreshListingPrice(b.dataset.name); return; }
       if (b && b.dataset.lact === 'relist') { relistLot(b.dataset.lot, parseInt(b.dataset.p, 10) || 0); return; }
       if (b && b.dataset.lact === 'draft') { lotsToDraft([b.dataset.lot]); return; }
+      if (b && b.dataset.lact === 'cancelall') {
+        const c = getListingCache();
+        const lots = Object.keys(c).filter(k => c[k].gone && !c[k].sold && !c[k].cancelled);
+        if (!lots.length) return;
+        if (!confirm(`Archive all ${lots.length} lots that are no longer listed as cancelled?\n\nOnly do this if none of them sold — a sold one marked cancelled won't be recorded as a sale. Your Tracker rows aren't changed.`)) return;
+        const now = new Date().toISOString();
+        lots.forEach(k => { c[k].cancelled = now; });
+        saveListingCache(c);
+        renderListingsView();
+        showToast(`↩ ${lots.length} lot${lots.length === 1 ? '' : 's'} archived as cancelled`);
+        return;
+      }
       if (b && b.dataset.lact === 'relistall') { relistAllActive(parseInt(b.dataset.p, 10) || 0); return; }
       if (b) { listingAction(b.dataset.lact, b.dataset.lot); return; }
       if (e.target.closest('#np-listings-value')) { valueListings(true); return; }
