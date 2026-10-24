@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neopets Trading Post Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.34.1
+// @version      2.35.0
 // @description  Track items you buy at the Trading Post and user shops for reselling, sales of your own lots, plus a watchlist for lots and items you didn't buy. Personal build: the Lister (Listings tab) lists items on the TP, relists lots, puts items up for auction, relists unsold ones and logs auction sales.
 // @author       You
 // @match        https://www.neopets.com/island/tradingpost.phtml*
@@ -2792,6 +2792,10 @@
       .np-offers-gone { margin-top: 12px; }
       .np-offers-gone summary { cursor: pointer; font-size: 11px; color: #e8a800; margin-bottom: 8px; }
       .np-offer-gone-note { font-size: 10px; margin-bottom: 8px; }
+      .np-lst-sec > summary { list-style: none; cursor: pointer; user-select: none; }
+      .np-lst-sec > summary::-webkit-details-marker { display: none; }
+      .np-lst-sec > summary::before { content: '▸ '; color: #e8a800; }
+      .np-lst-sec[open] > summary::before { content: '▾ '; }
 
       /* ── Watch View ── */
       #np-view-watch .np-pnl-cards { grid-template-columns: repeat(2, 1fr); margin-bottom: 10px; }
@@ -5252,7 +5256,54 @@
     return null;
   }
 
+  // Neopets' "View Details" link has no https:// — the browser then resolves it
+  // as a path under /island/ (…/island/www.neopets.com/island/…). Rebuild it.
+  function fixTpLink(href) {
+    const m = String(href || '').match(/tradingpost\.phtml.*$/);
+    return m ? 'https://www.neopets.com/island/' + m[0] : String(href || '');
+  }
+
+  // The View Details popup lists every item in a lot (Your Trades shows 4).
+  // Opening it once fills in the whole lot so it can be relisted.
+  function readLotPopup(popup) {
+    const lotP = [...popup.querySelectorAll('p')].find(p => /^Lot\s+\d+$/.test(p.textContent.trim()));
+    const grid = popup.querySelector('div.grid');
+    if (!lotP || !grid) return null;
+    const byName = new Map();
+    for (const cell of grid.children) {
+      const ps = cell.querySelectorAll('p');
+      const name = ps.length ? ps[ps.length - 1].textContent.trim() : '';
+      if (!name) continue;
+      const c = cell.querySelector('.item-count');
+      const qty = c ? (parseInt(c.textContent.replace(/\D/g, ''), 10) || 1) : 1;
+      byName.set(name, (byName.get(name) || 0) + qty);
+    }
+    if (!byName.size) return null;
+    const wl = [...popup.querySelectorAll('p')].find(p => p.textContent.trim() === 'Wishlist:');
+    const wish = wl && wl.nextElementSibling ? wl.nextElementSibling.textContent.trim() : '';
+    return { lot: lotP.textContent.replace(/\D/g, ''), items: [...byName].map(([name, qty]) => ({ name, qty })), wishlist: wish };
+  }
+  function scanLotPopup() {
+    const popup = document.querySelector('.tp-popup');
+    if (!popup) return false;
+    const d = readLotPopup(popup);
+    if (!d) return false;
+    const cache = getListingCache();
+    const prev = cache[d.lot];
+    if (!prev || prev.sold) return false;   // only lots the Tracker already knows from Your Trades
+    const rar = new Map((prev.items || []).map(i => [wKey(i.name), i.rarity]));
+    const items = d.items.map(i => ({ name: i.name, qty: i.qty, rarity: rar.get(wKey(i.name)) || '' }));
+    if (!prev.truncated && JSON.stringify(items) === JSON.stringify(prev.items)) return false;
+    cache[d.lot] = { ...prev, items, truncated: false, full: true, wishlist: d.wishlist || prev.wishlist || '' };
+    saveListingCache(cache);
+    if (prev.truncated) showToast(`📋 Lot #${d.lot}: all ${items.reduce((t, i) => t + i.qty, 0)} items loaded — it can be relisted now`);
+    const view = document.getElementById('np-view-listings');
+    if (view && !view.classList.contains('np-hidden')) renderListingsView();
+    return true;
+  }
+
   function readListingCard(card) {
+    if (card.closest('.tp-popup')) return null;   // the View Details popup uses the same frame
     const ps = [...card.querySelectorAll('p')];
     const lotP = ps.find(p => p.classList.contains('text-cafeteria') && /^Lot\s+\d+$/.test(p.textContent.trim()));
     if (!lotP) return null;
@@ -5283,7 +5334,7 @@
       ib,
       wishlist: wishEl ? wishEl.textContent.trim() : '',
       postedTxt: postedP ? postedP.textContent.trim() : '',
-      link: link ? link.href : ''
+      link: link ? fixTpLink(link.href) : ''
     };
   }
 
@@ -5293,6 +5344,7 @@
     if (!onYourTrades() && !(!h || h === '#' || h === '#/' || /type=view/.test(h))) return;
     clearTimeout(listingScanTimer);
     listingScanTimer = setTimeout(() => {
+      scanLotPopup();
       const count = activeLotCounter();
       if (count === null) return;   // not the Your Trades view, or not rendered yet
       const cards = [...document.querySelectorAll('div.tp-border-frame')].map(readListingCard).filter(Boolean);
@@ -5304,15 +5356,17 @@
         onPage.add(c.lot);
         const prev = cache[c.lot] || {};
         const { gone, cancelled, ...rest } = prev;   // back on the page → live again
-        const keepOld = c.truncated && prev.items && prev.items.length > c.items.length;
+        // Keep a fuller list (earlier card, or every item from View Details)
+        const keepOld = c.truncated && prev.items && (prev.full || prev.items.length > c.items.length);
         cache[c.lot] = {
           ...rest,
           items: keepOld ? prev.items : c.items.map(i => ({ name: i.name, qty: i.qty || 1, rarity: i.rarity })),
           truncated: keepOld ? !!prev.truncated : c.truncated,
+          full: keepOld ? !!prev.full : false,
           ib: c.ib,
           wishlist: c.wishlist,
           posted: prev.posted || postedToIso(c.postedTxt) || now,
-          link: c.link || prev.link || '',
+          link: c.link || fixTpLink(prev.link) || '',
           seen: prev.seen || now
         };
       }
@@ -5347,6 +5401,10 @@
   // Reads np_listing_cache. Item prices come from np_listing_prices (saved,
   // no expiry): shown on every item, refreshed all at once or one by one.
   const LISTINGS_SUB_KEY = 'np_listings_sub';
+  // Open/closed state of the Active / Old trades sections (active open by default)
+  const LISTINGS_SEC_KEY = 'np_listings_sec';
+  function getSecOpen() { try { return JSON.parse(GM_getValue(LISTINGS_SEC_KEY, '{}')) || {}; } catch { return {}; } }
+  function secOpen(k) { const o = getSecOpen(); return k in o ? !!o[k] : k === 'active'; }
   let listingsDefer = null;
   let listingsLastHtml = '';
   // Mouse held down anywhere in the panel → background redraws wait (see above)
@@ -5431,7 +5489,7 @@
     const chips = (l) => (l.items || []).map(it =>
       `<span class="np-offer-item"${it.rarity ? ` title="${escHtml(it.rarity)}"` : ''}>${(it.qty || 1) > 1 ? it.qty + '× ' : ''}${escHtml(it.name)}${chipPx(it)}</span>`).join('')
       + (l.truncated ? '<span class="np-offer-item np-muted" title="Your Trades shows 4 items per lot">+more</span>' : '');
-    const lotLink = (l) => l.link || `https://www.neopets.com/island/tradingpost.phtml#/?type=makeoffer&lot_id=${encodeURIComponent(l.lot)}`;
+    const lotLink = (l) => (l.link && fixTpLink(l.link)) || `https://www.neopets.com/island/tradingpost.phtml#/?type=makeoffer&lot_id=${encodeURIComponent(l.lot)}`;
     const sign = (n) => (n >= 0 ? '+' : '') + formatNP(n);
     const pxNames = listingItemNames();
     const savedTs = [...pxNames.keys()].map(k => prices[k] && prices[k].t).filter(Boolean);
@@ -5512,20 +5570,34 @@
         <button id="np-listings-value"${lockPx ? ' disabled' : ''} title="Fetch a fresh itemdb price for every item in your listings">${listingValuing ? '⏳ Refreshing…' : '🔄 Refresh all prices'}</button>
       </div>
       ${priceLine ? `<div class="np-offer-sync np-muted">${priceLine}</div>` : ''}
-      ${PERSONAL_BUILD && all.some(unsoldLot) ? `<div class="np-panel-toolbar"><button type="button" class="np-q-btn np-q-main" data-lact="draftall" title="Every cancelled lot, and every lot gone without a sale popup, into the 🏷 list at its old price">🏷 List all unsold (${all.filter(unsoldLot).length})</button></div>` : ''}
-      <div class="np-pnl-section-title">🏝️ Active trades (${active.length})</div>
-      ${active.length ? active.map(l => card(l, 'active')).join('')
-        : `<div style="text-align:center;padding:30px;color:#999999;font-style:italic;">🏝️ No active lots cached.<br>Open Your Trades once to load them.</div>`}
-      ${gone.length ? `
-        <div class="np-pnl-section-title" style="margin-top:14px">No longer listed (${gone.length})</div>
-        <div class="np-muted np-offer-gone-note">Gone from Your Trades without a sale popup. ✅ Sold records it (instant-buy or wishlist price, or the price you enter); ↩ Cancelled just archives it.</div>
-        ${gone.map(l => card(l, 'gone')).join('')}` : ''}
-      ${closed.length ? `
-        <details class="np-offers-gone">
-          <summary>Sold &amp; cancelled (${closed.length})</summary>
+      ${(() => {
+        if (!PERSONAL_BUILD) return '';
+        const ok = active.filter(relistableActive);
+        if (!ok.length) return '';
+        const skip = active.length - ok.length;
+        return `<div class="np-au-bulk">
+          <span>↻ Relist all <b>${ok.length}</b> active trade${ok.length === 1 ? '' : 's'} at</span>
+          ${[0, 5, 10, 15, 20].map(pc => `<button class="np-watch-act" data-lact="relistall" data-p="${pc}" title="Delete each active lot and list the same items again at ${pc ? '−' + pc + '% of its price' : 'its current price'}">${pc ? '−' + pc : '0'}%</button>`).join('')}
+          ${skip ? `<span class="np-muted" style="font-size:10px" title="No price, items not all known, or already queued">· ${skip} skipped</span>` : ''}
+        </div>`;
+      })()}
+      <details class="np-lst-sec"${secOpen('active') ? ' open' : ''}>
+        <summary class="np-pnl-section-title" data-sec="active">🏝️ Active trades (${active.length})</summary>
+        ${active.length ? active.map(l => card(l, 'active')).join('')
+          : `<div style="text-align:center;padding:30px;color:#999999;font-style:italic;">🏝️ No active lots cached.<br>Open Your Trades once to load them.</div>`}
+      </details>
+      ${gone.length || closed.length ? `
+      <details class="np-lst-sec" style="margin-top:14px"${secOpen('old') ? ' open' : ''}>
+        <summary class="np-pnl-section-title" data-sec="old">🗂 Old trades (${gone.length + closed.length})${gone.length ? ` · ${gone.length} to sort` : ''}</summary>
+        ${gone.length ? `
+          <div class="np-pnl-section-title" style="margin-top:6px">No longer listed (${gone.length})</div>
+          <div class="np-muted np-offer-gone-note">Gone from Your Trades without a sale popup. ✅ Sold records it (instant-buy or wishlist price, or the price you enter); ↩ Cancelled just archives it.</div>
+          ${gone.map(l => card(l, 'gone')).join('')}` : ''}
+        ${closed.length ? `
+          <div class="np-pnl-section-title" style="margin-top:10px">Sold &amp; cancelled (${closed.length})</div>
           <div class="np-muted np-offer-gone-note">Kept for ${LISTING_KEEP_DAYS} days.</div>
-          ${closed.map(l => card(l, 'closed')).join('')}
-        </details>` : ''}
+          ${closed.map(l => card(l, 'closed')).join('')}` : ''}
+      </details>` : ''}
     `;
 
     // Personal build: 🏝️ Trades | 🔨 Auctions sub-tabs, the Lister's status strip
@@ -5558,6 +5630,13 @@
     }
 
     view.onclick = (e) => {
+      const sec = e.target.closest('summary[data-sec]');
+      if (sec) {
+        // Remember open/closed so a re-render keeps it
+        const d = sec.parentElement;
+        setTimeout(() => { const o = getSecOpen(); o[sec.dataset.sec] = d.open; GM_setValue(LISTINGS_SEC_KEY, JSON.stringify(o)); }, 0);
+        return;
+      }
       const hb = e.target.closest('.np-lst-hist');
       if (hb) { toggleListingHist(hb.dataset.hist); return; }
       const pick = e.target.closest('.np-au-pick, .np-au-pickall');
@@ -5590,15 +5669,7 @@
       if (b && b.dataset.lact === 'price') { refreshListingPrice(b.dataset.name); return; }
       if (b && b.dataset.lact === 'relist') { relistLot(b.dataset.lot, parseInt(b.dataset.p, 10) || 0); return; }
       if (b && b.dataset.lact === 'draft') { lotsToDraft([b.dataset.lot]); return; }
-      if (b && b.dataset.lact === 'draftall') {
-        const c = getListingCache();
-        const lots = Object.keys(c).filter(k => unsoldLot(c[k]));
-        const gone = lots.filter(k => !c[k].cancelled).length;
-        if (!lots.length) return;
-        if (!confirm(`Add the items from ${lots.length} unsold lot${lots.length === 1 ? '' : 's'} to the 🏷 list, at their old prices?${gone ? `\n\n${gone} of them disappeared without a sale popup — if any of those actually sold, remove them from the list before sending.` : ''}`)) return;
-        lotsToDraft(lots);
-        return;
-      }
+      if (b && b.dataset.lact === 'relistall') { relistAllActive(parseInt(b.dataset.p, 10) || 0); return; }
       if (b) { listingAction(b.dataset.lact, b.dataset.lot); return; }
       if (e.target.closest('#np-listings-value')) { valueListings(true); return; }
     };
@@ -5624,17 +5695,49 @@
   function relistControls(l, past) {
     if (!l.px) return '';
     if (relistQueued(l.lot)) return '<div class="np-muted np-watch-line">↻ Relist queued — running from ▶ Run queue above</div>';
-    if (l.truncated) return '<div class="np-muted np-watch-line" title="Your Trades only shows the first items of this lot">↻ Relist unavailable: not all items are known</div>';
+    if (l.truncated) return `<div class="np-muted np-watch-line" title="Your Trades only shows the first 4 items of a lot">↻ To relist, press View Details on this lot in <a class="np-offer-link-inline" href="https://www.neopets.com/island/tradingpost.phtml" target="_blank" rel="noopener">Your Trades</a> once to load all items</div>`;
     return `${l.relistedAt ? `<div class="np-muted np-watch-line">↻ Relisted ${timeAgo(l.relistedAt)}</div>` : ''}
       <div class="np-watch-actions np-rl"><span class="np-muted" style="font-size:11px">↻ Relist${past ? ' again' : ''}</span>
         ${[0, 5, 10, 15, 20].map(p => `<button class="np-watch-act" data-lact="relist" data-lot="${escHtml(l.lot)}" data-p="${p}" title="${past ? 'List the same items again' : 'Delete this lot and list the same items'} at ${formatNP(relistPrice(l.px, p))} NP">${p ? '−' + p : '0'}%</button>`).join('')}
       </div>`;
   }
+  const lotPrice = l => { const a = l.ib ? null : parseAskPrice(l.wishlist); return l.ib || (a ? a.v : 0); };
+  // An active lot the bulk relist can take: priced, every item known, not queued
+  const relistableActive = l => !!l && !l.sold && !l.cancelled && !l.gone && !l.truncated
+    && (l.items || []).length && lotPrice(l) > 0 && !relistQueued(l.lot);
+  // Puts one lot into the Lister queue as a relist group (no prompts)
+  function queueRelist(q, lot, l, pct) {
+    const px = lotPrice(l);
+    const price = relistPrice(px, pct);
+    const gid = 'r' + lot;
+    q.groups = q.groups || {};
+    q.groups[gid] = { lot: String(lot), price, from: px, pct, past: !!(l.cancelled || l.gone) };
+    q.items.push(...mergeItems(l.items).map(i => ({ name: i.name, qty: i.qty, price: null, group: gid })));
+    l.relistedAt = new Date().toISOString();
+    return price;
+  }
+  const newListerQueue = () => getListerQueue() || { v: 1, created: new Date().toISOString(), mode: 'single', lotSize: 30, items: [], done: [], missing: [] };
+  function relistAllActive(pct) {
+    const cache = getListingCache();
+    const lots = Object.keys(cache).filter(k => relistableActive(cache[k]));
+    if (!lots.length) { showToast('No active trades that can be relisted'); return; }
+    const total = lots.reduce((t, k) => t + relistPrice(lotPrice(cache[k]), pct), 0);
+    if (!confirm(`Relist all ${lots.length} active trade${lots.length === 1 ? '' : 's'}${pct ? ` at −${pct}%` : ' at their current price'} (${formatNP(total)} NP in all)?\n\nThe Lister deletes each lot on the Trading Post, then lists the same items again. Any that sell before it gets to them are skipped.`)) return;
+    const q = newListerQueue();
+    for (const k of lots) queueRelist(q, k, cache[k], pct);
+    q.updated = new Date().toISOString();
+    localStorage.setItem(LISTER_QUEUE_KEY, JSON.stringify(q));
+    saveListingCache(cache);
+    renderListingsView();
+    renderListDrawer();
+    listerRefresh();
+    if (lister && lister.startQueue()) showToast(`↻ Relisting ${lots.length} lot${lots.length === 1 ? '' : 's'}…`);
+    else showToast(`↻ ${lots.length} lot${lots.length === 1 ? '' : 's'} queued — the Lister is busy; it runs with ▶ Run queue after`);
+  }
   function relistLot(lot, pct) {
     const l = getListingCache()[lot];
     if (!l) return;
-    const ask = l.ib ? null : parseAskPrice(l.wishlist);
-    const px = l.ib || (ask ? ask.v : 0);
+    const px = lotPrice(l);
     if (!px) { showToast('This lot has no price to relist at'); return; }
     if (relistQueued(lot)) { showToast(`↻ Lot #${lot} is already queued`); return; }
     const items = mergeItems(l.items);
@@ -5647,15 +5750,12 @@
       ? `This lot is already off the Trading Post, so the items are taken from your inventory, SDB or gallery and listed as a new lot. ${l.gone && !l.cancelled ? 'It disappeared without a sale popup — only relist if it didn\'t sell. ' : ''}Anything not found is left out and the price scaled down.`
       : 'The Lister deletes the lot on the Trading Post, then lists the same items again. If it has sold by then, it\'s skipped.';
     if (!confirm(`Relist lot #${lot} at ${formatNP(price)} NP${pct ? ` (−${pct}%)` : ''} as ${how}?\n\n${items.map(i => `${i.qty > 1 ? i.qty + '× ' : ''}${i.name}`).join(', ')}\n\n${note}`)) return;
-    const gid = 'r' + lot;
-    const q = getListerQueue() || { v: 1, created: new Date().toISOString(), mode: 'single', lotSize: 30, items: [], done: [], missing: [] };
-    q.groups = q.groups || {};
-    q.groups[gid] = { lot: String(lot), price, from: px, pct, past };
-    q.items.push(...items.map(i => ({ name: i.name, qty: i.qty, price: null, group: gid })));
+    const q = newListerQueue();
+    const cache = getListingCache();
+    queueRelist(q, lot, cache[lot], pct);
     q.updated = new Date().toISOString();
     localStorage.setItem(LISTER_QUEUE_KEY, JSON.stringify(q));
-    const cache = getListingCache();
-    if (cache[lot]) { cache[lot].relistedAt = new Date().toISOString(); saveListingCache(cache); }
+    saveListingCache(cache);
     renderListingsView();
     renderListDrawer();
     listerRefresh();
@@ -6029,6 +6129,7 @@
   }
 
   // Unsold auction: set the relist price (% of the original start), or don't relist
+  const bidderOf = en => !!(en.bidder && !/^nobody$/i.test(en.bidder));
   function auctionAction(act, key, pct) {
     if (act === 'clearpast') { clearPastAuctions(); return; }
     if (act === 'notsoldall') {
@@ -6067,6 +6168,12 @@
     } else if (act === 'notsold' && en.status === 'gone') {
       en.status = 'lost'; en.ended = en.ended || new Date().toISOString();
     } else if (act === 'relist') {
+      relistAuctions([key], pct || 0);
+      return;
+    } else if (act === 'relistgone' && en.status === 'gone') {
+      if (bidderOf(en) && !confirm(`${en.name} had a bid from ${en.bidder} — it may have sold. Relist it anyway?`)) return;
+      en.status = 'lost'; en.ended = en.ended || new Date().toISOString();
+      saveAucReg(r);
       relistAuctions([key], pct || 0);
       return;
     } else if (act === 'pct' && en.status === 'unsold') {
@@ -6198,6 +6305,10 @@
             <button class="np-watch-act" data-aact="logsale" data-key="${escHtml(e.key)}" title="Log it: oldest matching Tracker rows are marked sold">✅ Log sale</button>
             <button class="np-watch-act" data-aact="notsold" data-key="${escHtml(e.key)}" title="It didn't sell — just archive it">↩ Not sold</button>
           </div>
+          ${(e.base || e.start) > 0 ? `<div class="np-watch-actions"><span class="np-muted" style="font-size:11px">↻ Not sold — relist at</span>${[0, 5, 10, 15, 20].map(pc => {
+            const v = relistPrice(e.base || e.start, pc);
+            return `<button class="np-watch-act" data-aact="relistgone" data-key="${escHtml(e.key)}" data-p="${pc}" title="It didn't sell: put it back up at ${formatNP(v)} NP (it must be back in your inventory, SDB or gallery)">${pc ? '−' + pc : '0'}%</button>`;
+          }).join('')}</div>` : ''}
         </div>`;
     };
     const soldRecent = past.filter(e => e.status === 'sold');
