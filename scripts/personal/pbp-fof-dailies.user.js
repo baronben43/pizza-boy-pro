@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBP Festival of Fears Dailies
 // @namespace    pizzaboypro
-// @version      1.0.0
+// @version      1.0.1
 // @description  Pizza Boy Pro — runs the Haunted Woods / Festival of Fears dailies from one button and logs prizes, NP and Fright Track points
 // @match        https://www.neopets.com/*
 // @grant        GM_getValue
@@ -16,9 +16,9 @@
 // ════════════════════════════════════════════════════════════════════════════
 // Activities, in run order:
 //   1 Apple Bobbing        once/day                              10 pts
-//   2 Test Your Strength   up to 4/day (direct GET, as the hammer does)   10 pts
-//   3 Wheel of Misfortune  free daily spin only                   5 pts
-//   4 Haunted Woods Hunt   until "special item" message           15 pts
+//   2 Test Your Strength   one swing per run (game allows 1 per 6h; direct GET, as the hammer does)  10 pts
+//   3 Wheel of Misfortune  up to 2 spins/day (free + premium)     5 pts
+//   4 Haunted Woods Hunt   one play/day                          15 pts
 //   5 Grave Danger         send chosen petpet / claim on return    5 pts
 //   6 Scratchcards         1 kiosk + SSW top-up to 5, never scratch keepers  5 pts
 //   7 Brain Tree           accept → 2 Esophagor reveals → submit  35 pts
@@ -36,7 +36,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
   // ─── Storage keys ─────────────────────────────────────────────────────────
@@ -57,8 +57,7 @@
                        'Pustravanganza Scratchcard', 'Rotting Riches Scratchcard'];
   const KIOSK_PRICE = 1200;
   const SCRATCH_PER_DAY = 5;
-  const STRENGTH_PER_DAY = 4;
-  const HUNT_SAFETY_CAP = 10;
+  const WHEEL_PER_DAY = 2;
   const REROLLS_PER_SLOT = 3;
   const VISIT_GUARD = 30;               // page visits per activity per run before giving up
 
@@ -92,6 +91,7 @@
   const fmtNP = n => (Number(n) || 0).toLocaleString('en-US');
   const rand = (a, b) => a + Math.random() * (b - a);
   const DELAY_REACT = () => rand(900, 2600);
+  const clean = s => String(s == null ? '' : s).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
   const toInt = s => { const n = parseInt(String(s || '').replace(/[^0-9]/g, ''), 10); return Number.isFinite(n) ? n : 0; };
   const path = () => location.pathname.replace(/\/index\.phtml$/, '/');
   const onPath = p => path() === p.replace(/\/index\.phtml$/, '/');
@@ -146,6 +146,7 @@
   function record(act, o) {
     const entries = load(K_LOG, []);
     const e = Object.assign({ ts: Date.now(), day: nstDay(), act, items: [], np: 0, spent: 0, points: 0, note: '' }, o);
+    e.note = clean(e.note); e.items = (e.items || []).map(clean).filter(Boolean);
     entries.push(e);
     save(K_LOG, entries);
     const bits = [];
@@ -451,29 +452,27 @@
   // 2 ─ Test Your Strength ───────────────────────────────────────────────────
   H.strength = async () => {
     if (!onPath(URL.strength)) return go(URL.strength);
-    let n = dayState().counts.strength || 0;
-    while (n < STRENGTH_PER_DAY) {
-      if (!await abortableSleep(rand(3500, 8000))) return;
-      setStatus('Test Your Strength swing ' + (n + 1) + '/' + STRENGTH_PER_DAY + '…');
-      let data = null, raw = '';
-      try {
-        const res = await fetch('/np-templates/ajax/process_strtest.php', { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        raw = await res.text();
-        data = JSON.parse(raw);
-      } catch { data = null; }
-      const msgHtml = data && data.message ? String(data.message) : '';
-      const msg = txt(new DOMParser().parseFromString(msgHtml, 'text/html').body);
-      if (!data || !/scored\s+\d+/i.test(msg)) {
-        log('Strength reply not a prize: ' + (msg || raw.replace(/<[^>]+>/g, ' ').slice(0, 160)), 'warn');
-        markDone('strength', 'limit or unknown reply');
-        return advance();
-      }
-      const score = (msg.match(/scored\s+(\d+)\s+out of/i) || [])[1];
-      const item = (msg.match(/won an? (.+?)!/i) || [])[1];
-      n = bump('strength');
-      record('strength', { items: item && !/neopoints/i.test(item) ? [item] : [], np: npFrom(msg), points: POINTS.strength, note: (data.score || '') + (score ? ' — ' + score + '/100' : '') });
+    if (/already played this game within the last/i.test(txt(mainContent()))) { markDone('strength', 'already swung (once per 6 hours)'); return advance(); }
+    if (!await abortableSleep(rand(3500, 8000))) return;
+    setStatus('Test Your Strength swing…');
+    let data = null, raw = '';
+    try {
+      const res = await fetch('/np-templates/ajax/process_strtest.php', { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+      raw = await res.text();
+      data = JSON.parse(raw);
+    } catch { data = null; }
+    const msg = clean(data && data.message ? data.message : '');
+    if (!data || !/scored\s+\d+/i.test(msg)) {
+      const why = /already played/i.test(raw) ? 'already swung (once per 6 hours)' : 'unknown reply';
+      if (why === 'unknown reply') log('Strength reply not a prize: ' + (msg || clean(raw)).slice(0, 160), 'warn');
+      markDone('strength', why);
+      return advance();
     }
-    markDone('strength', STRENGTH_PER_DAY + ' swings');
+    const score = (msg.match(/scored\s+(\d+)\s+out of/i) || [])[1];
+    const item = (msg.match(/won an? (.+?)!/i) || [])[1];
+    bump('strength');
+    record('strength', { items: item && !/neopoints/i.test(item) ? [item] : [], np: npFrom(msg), points: POINTS.strength, note: clean(data.score) + (score ? ' — ' + score + '/100' : '') });
+    markDone('strength', 'swung — next one in 6 hours');
     return advance();
   };
 
@@ -482,28 +481,32 @@
     if (!onPath(URL.wheel)) return go(URL.wheel);
     await waitForEl(() => qs('#wheelCanvas canvas'), 10000);
     if (!await abortableSleep(2500)) return;
-    const costP = qsa('p', mainContent()).find(p => /Cost:/i.test(txt(p)));
-    const cost = costP ? toInt(txt(costP)) : 0;
     const btn = qs('#wheelButtonSpin');
-    if (isVisible(qs('#wheelDonePopup')) || !btn || !isVisible(btn)) { markDone('wheel', 'already spun'); return advance(); }
-    if (cost > 0) { markDone('wheel', 'no free spin (costs ' + fmtNP(cost) + ' NP)'); return advance(); }
+    if ((dayState().counts.wheel || 0) >= WHEEL_PER_DAY) { markDone('wheel', WHEEL_PER_DAY + ' spins'); return advance(); }
+    if (isVisible(qs('#wheelDonePopup')) || !btn || !isVisible(btn)) { markDone('wheel', 'no spins left'); return advance(); }
     if (!await humanPause()) return;
     btn.click();
     const claim = await waitForEl(() => isVisible(qs('#clickToShowPrize')) || isVisible(qs('#wheelPrizePopup')) ? true : null, 30000);
-    if (!claim) { record('wheel', { points: POINTS.wheel, note: 'spun, prize not read (no claim prompt)' }); markDone('wheel'); return advance(); }
+    if (!claim) { record('wheel', { points: POINTS.wheel, note: 'spun, prize not read (no claim prompt)' }); return wheelNext(); }
     if (!isVisible(qs('#wheelPrizePopup'))) {
       if (!await abortableSleep(DELAY_REACT())) return;
       clickCanvasCentre(qs('#wheelCanvas canvas') || qs('canvas', mainContent()));
     }
     const shown = await waitForEl(() => isVisible(qs('#wheelPrizePopup')) ? true : null, 8000);
-    if (!shown) { record('wheel', { points: POINTS.wheel, note: 'spun, prize not read' }); markDone('wheel'); return advance(); }
+    if (!shown) { record('wheel', { points: POINTS.wheel, note: 'spun, prize not read' }); return wheelNext(); }
     const ok = isVisible(qs('#responseDisplaySuccess'));
     const item = ok ? txt(qs('#itemName')) : '';
     const msg = ok ? txt(qs('#spinMessage')) : txt(qs('#failMessage'));
     record('wheel', { items: item ? [item] : [], np: npFrom(msg + ' ' + item), points: POINTS.wheel, note: msg });
-    markDone('wheel');
-    return advance();
+    return wheelNext();
   };
+
+  // After a spin: reload for the premium second spin, or finish.
+  function wheelNext() {
+    const n = bump('wheel');
+    if (n >= WHEEL_PER_DAY) { markDone('wheel', n + ' spins'); return advance(); }
+    return go(URL.wheel);
+  }
 
   function clickCanvasCentre(c) {
     if (!c) return;
@@ -523,10 +526,10 @@
       const t = pops.find(p => /collect|smell|find|found|treasure|you/i.test(p)) || pops[0] || '';
       const nothing = /nothing to collect/i.test(t);
       const item = nothing ? '' : ((t.match(/(?:found|find|discover(?:ed)?|receive[ds]?|get|got)\s+(?:an?\s+|some\s+)?([A-Z][^.!]{2,60})[.!]/) || [])[1] || '');
-      const n = bump('hunt');
+      bump('hunt');
       record('hunt', { items: item ? [item] : [], np: npFrom(t), points: POINTS.hunt, note: nothing ? 'nothing to collect' : t.slice(0, 220) });
-      if (n >= HUNT_SAFETY_CAP) { markDone('hunt', 'safety cap ' + HUNT_SAFETY_CAP); return advance(); }
-      return go(URL.hunt);
+      markDone('hunt', 'played');
+      return advance();
     }
     const page = txt(mainContent());
     if (/may need a special item/i.test(page)) { markDone('hunt', 'no free plays left'); return advance(); }
@@ -640,6 +643,10 @@
     // Mid-card: scratch squares, or read the result.
     if (onPath('/halloween/scratch2.phtml') || onPath('/halloween/process_scratch.phtml')) return scratchCardPage();
     if (!onPath(URL.scratch)) return go(URL.scratch);
+    if (/in the middle of scratching your card/i.test(txt(mainContent()))) {
+      log('Scratchcards: a card was left half-scratched — continuing it');
+      return go('/halloween/scratch2.phtml');
+    }
 
     const r = run();
     // SSW top-up came back.
@@ -726,8 +733,8 @@
     const page = txt(mainContent());
     const squares = qsa('a[href*="process_scratch.phtml?type=scratch&loc="]');
     const card = run().sub.card || { name: '', clicked: [] };
-    const result = /Sidney says|You sscratched the wrong|won|prize/i.test(page) && !squares.length;
-    if (result || /looserkeeper|winnerkeeper|happykeeper/.test(mainContent().innerHTML) && !squares.length) {
+    const verdict = !squares.length && (/Sidney says/i.test(page) || /looserkeeper|winnerkeeper|winkeeper/.test(mainContent().innerHTML));
+    if (verdict) {
       const lost = /wrong thingss/i.test(page);
       const prize = lost ? '' : (txt(qsa('b, strong', mainContent()).find(b => !/Sidney|Scratch/i.test(txt(b)))) || '');
       bump('scratch');
@@ -742,8 +749,8 @@
       updateRun(x => { x.sub.card = Object.assign({ name: '', clicked: [] }, x.sub.card); x.sub.card.clicked.push(pick.href); });
       return go(pick.href);
     }
-    if (visit('scratch_odd') > VISIT_GUARD) { markDone('scratch', 'scratch page not recognised'); return advance(); }
-    return go(URL.scratch);
+    if (visit('scratch_odd') > 6) { log('Scratchcards: page not recognised — ' + page.slice(0, 160), 'warn'); markDone('scratch', 'scratch page not recognised'); return advance(); }
+    return go(onPath('/halloween/scratch2.phtml') ? URL.scratch : '/halloween/scratch2.phtml');
   }
 
   // 7 ─ Brain Tree ───────────────────────────────────────────────────────────
@@ -1145,6 +1152,7 @@
   let statusText = '';
   const liveLog = [];
   function log(msg, kind) {
+    msg = clean(msg);
     liveLog.push({ t: new Date().toLocaleTimeString(), msg, kind: kind || '' });
     while (liveLog.length > 60) liveLog.shift();
     const ll = load('pbp_fof_livelog', []);
@@ -1187,7 +1195,15 @@
 #pbpfof table{width:100%;border-collapse:collapse;font-size:11px}
 #pbpfof td{padding:2px 3px;border-bottom:1px solid #3a3a3a;vertical-align:top}
 #pbpfof .card{display:grid;grid-template-columns:auto 1fr auto auto;gap:4px;align-items:center;margin:2px 0}
-#pbpfof .small{font-size:10px;color:#aaa}`;
+#pbpfof .small{font-size:10px;color:#aaa}
+#pbpfof td,#pbpfof th,#pbpfof div,#pbpfof span,#pbpfof label,#pbpfof b,#pbpfof p{color:#eee !important;font-family:Ubuntu,Arial,sans-serif !important;background:transparent}
+#pbpfof table td{font-size:11px !important;line-height:1.35 !important}
+#pbpfof .hd,#pbpfof .hd *{color:#1a1a1a !important}
+#pbpfof .tally div{background:#383838 !important}#pbpfof .tally b,#pbpfof .stat{color:#ffcf4d !important}
+#pbpfof .small,#pbpfof .small *{color:#aaa !important}
+#pbpfof .done,#pbpfof .ok,#pbpfof td.done{color:#7fd18b !important}#pbpfof .warn,#pbpfof span.warn{color:#ff9d7a !important}#pbpfof .prize,#pbpfof span.prize{color:#ffcf4d !important}
+#pbpfof .log,#pbpfof .log div{background:#1e1e1e;font-family:monospace !important}
+#pbpfof a.rst{color:#e8a800 !important;text-decoration:none;font-weight:700}`;
     document.head.appendChild(st);
   }
 
@@ -1241,7 +1257,7 @@
   <div class="small">Event total: ${fmtNP(all.points)} pts · ${fmtNP(all.np)} NP won · ${fmtNP(all.spent)} spent · <b style="color:${all.np - all.spent >= 0 ? '#7fd18b' : '#ff9d7a'}">net ${all.np - all.spent >= 0 ? '+' : ''}${fmtNP(all.np - all.spent)}</b> · ${all.items} items</div>
 
   <details data-k="acts"><summary>Activities</summary>
-    <div class="acts">${ORDER.map(a => `<label><input type="checkbox" data-act="${a}" ${s.enabled[a] ? 'checked' : ''}> ${LABEL[a]} <span class="done">${doneLine(a)}</span></label>`).join('')}</div>
+    <div class="acts">${ORDER.map(a => `<label><input type="checkbox" data-act="${a}" ${s.enabled[a] ? 'checked' : ''}> ${LABEL[a]} <span class="done">${doneLine(a)}</span>${doneLine(a) ? ` <a href="#" class="rst" data-reset="${a}" title="Reset today's state for ${LABEL[a]}">↺</a>` : ''}</label>`).join('')}</div>
   </details>
 
   <details data-k="quests"><summary>Esophagor / Edna</summary>
@@ -1303,6 +1319,7 @@
     on('pbpfof-stop', () => stopRun());
     on('pbpfof-diag', diagnose);
     on('pbpfof-export', exportLog);
+    qsa('a[data-reset]', p).forEach(a => a.onclick = e => { e.preventDefault(); resetActivity(a.dataset.reset); });
     qsa('input[data-act]', p).forEach(cb => cb.onchange = () => { const s = settings(); s.enabled[cb.dataset.act] = cb.checked; saveSettings(s); });
     qsa('input[data-buy]', p).forEach(cb => cb.onchange = () => { const s = settings(); s.scratchBuy[cb.dataset.buy] = cb.checked; saveSettings(s); });
     qsa('input[data-keep]', p).forEach(cb => cb.onchange = () => { const s = settings(); s.scratchKeep[cb.dataset.keep] = cb.checked; saveSettings(s); });
@@ -1312,6 +1329,18 @@
     }
     const gd = qs('#s-gd', p);
     if (gd) gd.onchange = () => { const s = settings(); s.gdPetpetOwner = gd.value; saveSettings(s); };
+  }
+
+  // Clear today's state for one activity so a run will do it again.
+  function resetActivity(act) {
+    updateDay(d => {
+      delete d.done[act]; delete d.counts[act];
+      if (act === 'scratch') { d.scratch.toppedUp = false; }
+      if (act === 'gravedanger') { d.gd.returnAt = 0; }
+      if (act === 'brain') { d.brain = {}; }
+    });
+    log(LABEL[act] + ' reset for today', 'ok');
+    renderPanel();
   }
 
   function diagnose() {
