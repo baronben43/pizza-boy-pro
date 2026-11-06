@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neopets Trading Post Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.35.1
+// @version      2.36.0
 // @description  Track items you buy at the Trading Post and user shops for reselling, sales of your own lots, plus a watchlist for lots and items you didn't buy. Personal build: the Lister (Listings tab) lists items on the TP, relists lots, puts items up for auction, relists unsold ones and logs auction sales.
 // @author       You
 // @match        https://www.neopets.com/island/tradingpost.phtml*
@@ -3099,6 +3099,8 @@
       #np-stat-tosell-card { cursor: help; }
       .np-chip-px { color: #ffd88a; margin-left: 5px; font-weight: bold; cursor: help; }
       .np-chip-px.none { color: #999999; font-weight: normal; }
+      .np-chip-tp { color: #8fd0ff; margin-left: 4px; font-weight: bold; cursor: help; }
+      .np-chip-tp.none { color: #999999; font-weight: normal; }
       .np-chip-rf {
         background: transparent !important; border: none !important; color: #999999 !important;
         cursor: pointer !important; font-size: 10px !important; padding: 0 0 0 3px !important;
@@ -4809,10 +4811,40 @@
   }
   function setListingPrice(key, name, res) {
     const p = getListingPrices();
+    const old = p[key] || {};
     p[key] = { name, v: res.status === 'ok' ? res.v : null, inflated: !!res.inflated,
-               slug: res.slug || (p[key] && p[key].slug) || null, t: Date.now() };
+               slug: res.slug || old.slug || null, t: Date.now() };
+    if (old.tpT) { p[key].tp = old.tp; p[key].tpT = old.tpT; }   // keep the saved TP price
     GM_setValue(LISTING_PRICE_KEY, JSON.stringify(p));
     renderValueStats();
+  }
+  // TP price from the item's own ↻ (never from 🔄 Refresh all — too many
+  // Neopets requests). tp: number, or null = no single-item instant-buy lot.
+  function setListingTp(key, name, res) {
+    const p = getListingPrices();
+    const e = p[key] || { name, v: null, inflated: false, slug: null, t: 0 };
+    e.tp = res.status === 'ok' ? res.v : null;
+    e.tpT = Date.now();
+    p[key] = e;
+    GM_setValue(LISTING_PRICE_KEY, JSON.stringify(p));
+  }
+  // Newest TP price we already have for an item, from any tab:
+  //   this item's own ↻ (any age — the age is shown), or a recent one (< 6h)
+  //   from Offers' "Value offers" or the Watch tab. No new requests.
+  // Returns { v, t, src } (v null = no single-item lot was found) or null.
+  function savedTpPrice(name, listingEntry) {
+    const key = wKey(name), now = Date.now();
+    const cands = [];
+    if (listingEntry && listingEntry.tpT) cands.push({ v: listingEntry.tp ?? null, t: listingEntry.tpT, src: '↻ on this item' });
+    const o = getOfferPrices()[key];
+    if (o && o.tpT && now - o.tpT < TP_PRICE_TTL) cands.push({ v: o.tp ?? null, t: o.tpT, src: 'Offers tab' });
+    const w = getWatch().items[key];
+    if (w && w.tp && w.tp.t) {
+      const t = Date.parse(w.tp.t);
+      if (Number.isFinite(t) && now - t < TP_PRICE_TTL) cands.push({ v: tpLow(w), t, src: 'Watch tab' });
+    }
+    if (!cands.length) return null;
+    return cands.sort((a, b) => b.t - a.t)[0];
   }
   function saveFetchedPrice(name, data) {
     const v = data && data.price && data.price.value;
@@ -5483,8 +5515,13 @@
       const tip = !e ? 'No itemdb price saved yet'
         : e.v ? `itemdb ${formatNP(e.v)} NP each${e.inflated ? ' (flagged inflated)' : ''} · saved ${when}`
         : `itemdb has no price · checked ${when}`;
-      return `<span class="np-chip-px${e && e.v ? '' : ' none'}" title="${escHtml(tip)}">${label}</span>`
-        + `<button type="button" class="np-chip-rf" data-lact="price" data-name="${escHtml(it.name)}" title="Refresh this item's itemdb price"${lockPx ? ' disabled' : ''}>↻</button>`;
+      const tp = savedTpPrice(it.name, e);
+      const tpHtml = !tp ? ''
+        : `<span class="np-chip-tp${tp.v ? '' : ' none'}" title="${escHtml(tp.v
+            ? `Cheapest single-item instant-buy on the TP: ${formatNP(tp.v)} NP · ${timeAgo(new Date(tp.t).toISOString())} via ${tp.src}. Asking price, so it can run high.`
+            : `No single-item instant-buy lot on the TP · checked ${timeAgo(new Date(tp.t).toISOString())} via ${tp.src}`)}">· TP ${tp.v ? shortNP(tp.v) : '—'}</span>`;
+      return `<span class="np-chip-px${e && e.v ? '' : ' none'}" title="${escHtml(tip)}">${label}</span>${tpHtml}`
+        + `<button type="button" class="np-chip-rf" data-lact="price" data-name="${escHtml(it.name)}" title="Refresh this item's itemdb price and search the Trading Post for it"${lockPx ? ' disabled' : ''}>↻</button>`;
     };
     const chips = (l) => (l.items || []).map(it =>
       `<span class="np-offer-item"${it.rarity ? ` title="${escHtml(it.rarity)}"` : ''}>${(it.qty || 1) > 1 ? it.qty + '× ' : ''}${escHtml(it.name)}${chipPx(it)}</span>`).join('')
@@ -5888,14 +5925,23 @@
     if (!key || listingValuing || listingPriceBusy) return;
     listingPriceBusy = key;
     renderListingsView();
-    let res = { status: 'error' };
-    try { res = await itemdbLookup(name); } finally { listingPriceBusy = null; }
-    if (res.status === 'ok' || res.status === 'none') setListingPrice(key, name, res);
+    let res = { status: 'error' }, tp = { status: 'error' };
+    try {
+      res = await itemdbLookup(name);
+      if (res.status === 'ok' || res.status === 'none') setListingPrice(key, name, res);
+      await sleep(jitter(600, 1200));
+      tp = await tpMinPrice(name);              // one TP search, only on this ↻
+      if (tp.status !== 'error') setListingTp(key, name, tp);
+    } finally { listingPriceBusy = null; }
     renderListingsView();
-    showToast(res.status === 'ok' ? `💰 ${name}: ${formatNP(res.v)} NP`
-      : res.status === 'none' ? `💰 ${name}: itemdb has no price`
-      : res.status === 'auth' ? '⚠️ itemdb session expired — open itemdb.com.br, then try again'
-      : `⚠️ Couldn't reach itemdb for ${name} — saved price kept`);
+    const idbBit = res.status === 'ok' ? `itemdb ${formatNP(res.v)} NP`
+      : res.status === 'none' ? 'itemdb has no price'
+      : res.status === 'auth' ? 'itemdb session expired (open itemdb.com.br)'
+      : "couldn't reach itemdb (saved price kept)";
+    const tpBit = tp.status === 'ok' ? `TP ${formatNP(tp.v)} NP`
+      : tp.status === 'none' ? 'no single-item lot on the TP'
+      : "TP search failed (saved TP price kept)";
+    showToast(`${res.status === 'ok' || res.status === 'none' ? '💰' : '⚠️'} ${name}: ${idbBit} · ${tpBit}`);
   }
 
   // ─── MAKE AN OFFER → NEW TAB ───────────────────────────────────────────────
