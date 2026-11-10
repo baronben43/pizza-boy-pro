@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.26.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.26.1 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -39,6 +39,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 - 1.25.0 — **Ctrl+click (⌘+click) any item image** (`images.neopets.com/items/`) opens the card; Ben chose Ctrl+click over a hover 🍕 button. Capture-phase click listener with preventDefault/stopImmediatePropagation so the page's own click (item menu, buy, link) never fires; mouseup/mousedown handlers skip it. Name: TP `.item-name-text` in the row → `data-itemname/data-item-name/data-name/alt/title` on img or 2 ancestors → first sensible text node in parent/grandparent. If no name is found, the click is left to the page. **Unverified:** inventory, SDB and shop layouts (Ben to paste DOM if names come out wrong); on Mac, Ctrl+click is a right-click, so ⌘ is used there.
 
 - 1.26.0 — **🍕 tag on TP lot boxes** (browse pages, independent of the passive setting): one item ×N → `🍕 1,700,000 each ×10 · −8% vs ours`; mixed lots → `avg X per item ×N · contents ≈ Y ours (k/n priced)` and the lot's % vs contents when every item is priced. `tagLotBox()` inserts `.pbp-lot-tag` after the Instant Buy row (else under the wishlist); `box.dataset.pbpTag` = lot number so Vue box reuse retags. Single-item, qty-1 lots get no tag (possible next step: % vs ours on those too). `getPriceLog()` now memoised for 2 s (one GM read per scan).
+
+- 1.26.1 — Ben: tag pushed "View Details" out of the fixed-height box. Tag now sits outside the white card, just before the bottom `.mt-auto` block ("No Offers Yet…"), using its slack space. If the bottom block then overflows the box, the tag is removed and a ` 🍕` with the same text as a hover title is appended to the "Instant Buy" label (or the wishlist). The fit check relies on live layout (not testable in jsdom).
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.26.0
+// @version      1.26.1
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -1681,7 +1681,7 @@
   // One item ×N → "🍕 1,700,000 each ×10" (+ % vs ours). Mixed → "avg X per item ×N" and,
   // where ours knows the contents, "contents ≈ Y (ours)" with the lot's % vs that. No requests.
   function tagLotBox(box, lot) {
-    box.querySelectorAll('.pbp-lot-tag').forEach(el => el.remove());
+    box.querySelectorAll('.pbp-lot-tag, .pbp-lot-pip').forEach(el => el.remove());
     const qty = lot.items.reduce((s, it) => s + it.qty, 0);
     if (!lot.items.length || qty < 2) return;
     const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
@@ -1710,18 +1710,33 @@
     const tag = document.createElement('div');
     tag.className = 'pbp-lot-tag';
     tag.innerHTML = html;
-    // Under the Instant Buy row if there is one, else under the wishlist
-    let anchor = null;
+    // 1.26.1: the box has a fixed height, so the tag goes in the spare space above
+    // "No Offers Yet…" (the bottom block is pushed down by mt-auto), outside the white card.
+    const bottom = [...box.children].find(el => el.classList.contains('mt-auto'));
+    let ibLabel = null;
     for (const p of box.querySelectorAll('p')) {
-      if (!p.closest('button') && clean(p.textContent).toLowerCase() === 'instant buy') { anchor = p.parentElement; break; }
+      if (!p.closest('button') && clean(p.textContent).toLowerCase() === 'instant buy') { ibLabel = p; break; }
     }
-    if (!anchor) { const w = box.querySelector('.wishlist-text'); anchor = w && w.parentElement; }
-    if (anchor) anchor.insertAdjacentElement('afterend', tag);
+    if (bottom) {
+      box.insertBefore(tag, bottom);
+      const fits = bottom.getBoundingClientRect().bottom <= box.getBoundingClientRect().bottom + 1;
+      if (fits) return;
+      tag.remove();
+    }
+    // No room: a small 🍕 beside "Instant Buy" (or the wishlist label); hover shows the same text
+    const host = ibLabel || box.querySelector('.wishlist-text');
+    if (!host) return;
+    const pip = document.createElement('span');
+    pip.className = 'pbp-lot-pip';
+    pip.textContent = ' 🍕';
+    pip.title = clean(tag.textContent.replace(/^🍕\s*/, ''));
+    host.appendChild(pip);
   }
   if (ON_TP) {
     const st = document.createElement('style');
     st.textContent = `
-      .pbp-lot-tag { margin: 6px 12px 0; padding: 4px 8px; border-radius: 6px; background: #2b2b2b; color: #f2e6c8;
+      .pbp-lot-pip { cursor: help; }
+      .pbp-lot-tag { margin: 0 12px 6px; padding: 4px 8px; border-radius: 6px; background: #2b2b2b; color: #f2e6c8;
         font: 12px/1.35 Verdana, sans-serif; text-align: center; }
       .pbp-lot-tag b { color: #e8a800; }
       .pbp-lot-tag .pbp-lt-dim { color: #999; }
