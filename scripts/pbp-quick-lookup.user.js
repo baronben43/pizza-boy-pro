@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.23.0
+// @version      1.24.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -911,7 +911,7 @@
         ${metaHtml}
         ${oursHtml}
         <div class="idb-watch-slot">${renderWatchLine(name, price)}</div>
-        ${renderOwned(name, price)}
+        ${renderOwned(name, price, idbPrice, ours.price != null ? ours.price : ours.oldPrice, useOurs)}
         <div class="idb-tp-row" data-item="${escHtml(name)}"></div>
         <div class="idb-hist" data-item="${escHtml(name)}" style="display:none;"></div>
         <div class="idb-watch-form"></div>
@@ -983,7 +983,8 @@
     return Number.isFinite(t) ? new Date(t).toLocaleDateString() : '';
   }
 
-  function renderOwned(itemName, idbPrice) {
+  // price = the card's price (ours when ours is in use); both itemdb and ours are shown
+  function renderOwned(itemName, idbPrice, itemdbPx, oursPx, usingOurs) {
     const rec = getHoldings(itemName);
     if (!rec || (!rec.lots.length && !rec.sales.length)) return '';
 
@@ -999,7 +1000,11 @@
       if (idbPrice) {
         const gain = idbPrice * qty - cost;
         const pct  = Math.round((idbPrice - avg) / avg * 100);
-        pl = `<br>Worth ${formatNP(idbPrice * qty)} NP now · ${signedNP(gain)} (${pct > 0 ? '+' : ''}${pct}%)`;
+        const both = [];
+        if (itemdbPx) both.push(`${formatNP(itemdbPx * qty)} NP (itemdb)`);
+        if (oursPx) both.push(`${formatNP(oursPx * qty)} NP (ours)`);
+        const worth = both.length ? both.join(' · ') : `${formatNP(idbPrice * qty)} NP`;
+        pl = `<br>Worth ${worth} · <span title="vs ${usingOurs ? 'ours' : 'itemdb'}">${signedNP(gain)} (${pct > 0 ? '+' : ''}${pct}%)</span>`;
       }
       lines.push(`<div class="idb-own-line">Holding <b>${qty}</b> · avg <b>${formatNP(avg)}</b> NP · ${formatNP(cost)} total${pl}</div>`);
 
@@ -1522,7 +1527,7 @@
       if (!name) continue;
       // A quantity badge, if the TP shows one, sits next to the item image
       const row = n.closest('.flex.gap-4') || (n.parentElement && n.parentElement.parentElement);
-      const badge = row && row.querySelector('.relative');
+      const badge = row && (row.querySelector('.item-count') || row.querySelector('.relative'));
       const m = badge && clean(badge.textContent).match(/(\d+)/);
       const qty = m ? (parseInt(m[1], 10) || 1) : 1;
       const k = itemKey(name);
@@ -1537,7 +1542,21 @@
       if (m) { ib = parseInt(m[1].replace(/,/g, ''), 10) || 0; if (ib) break; }
     }
     const wishEl = box.querySelector('.wishlist-text');
-    return { id: lotNum, items: [...items.values()], ib, wish: wishEl ? clean(wishEl.textContent) : '' };
+    return { id: lotNum, items: [...items.values()], ib, wish: wishEl ? clean(wishEl.textContent) : '', posted: postedAgo(box) };
+  }
+
+  // "Posted 2 days ago" / "Posted 5 hours ago" / "Posted yesterday" → ms timestamp (approximate)
+  function postedAgo(box) {
+    const txt = clean(box.textContent).match(/Posted\s+(just now|yesterday|an?\s+\w+\s+ago|\d+\s+\w+\s+ago)/i);
+    if (!txt) return 0;
+    const t = txt[1].toLowerCase();
+    if (t === 'just now') return Date.now();
+    if (t === 'yesterday') return Date.now() - 86400000;
+    const m = t.match(/^(an?|\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$/);
+    if (!m) return 0;
+    const n = /^\d+$/.test(m[1]) ? parseInt(m[1], 10) : 1;
+    const unit = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e5, month: 2592e6, year: 31536e6 }[m[2]];
+    return Date.now() - n * unit;
   }
 
   // ── Check TP: save every lot on the page that was already fetched ──
@@ -1642,7 +1661,7 @@
       if (!price) continue;
       const each = price / it.qty;
       if (each < set.minPx) continue;
-      out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty });
+      out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty, t: lot.posted || 0 });
     }
     if (out.length) recordPrices(out);
   }
@@ -1947,7 +1966,7 @@
         const nm = String(pick(it, ['name', 'item_name', 'itemName', 'obj_name']) || '').toLowerCase();
         if (nm && nm !== target) allMatch = false;
       }
-      return { known: true, single: count === 1 && allMatch, count };
+      return { known: true, single: count === 1 && allMatch, same: allMatch, count };
     }
     const n = Number(pick(lot, ['item_count', 'itemCount', 'num_items', 'numItems', 'total_items']));
     if (Number.isFinite(n) && n > 0) return { known: true, single: n === 1, count: n };
@@ -2055,7 +2074,9 @@
       wishlist: String(pick(lot, ['wishlist', 'wish_list', 'wishList']) || ''),
       known: c.known,
       single: c.single,
-      count: c.count
+      multi: !!c.same && c.count > 1,
+      count: c.count,
+      each: c.count > 0 ? Math.round(Number(lot.instant_buy_amount || 0) / c.count) : 0
     };
   }
 
@@ -2076,6 +2097,8 @@
     for (const l of ib) l.firstSeen = seenMap[l.lotId] || null;
 
     const singles = ib.filter(l => l.single);
+    // Lots of several of this one item: listed per item, but kept out of the live rate
+    const multis = ib.filter(l => l.multi);
     // Going rate: only when every priced single lot is instant buy (no wishlist-only asks)
     const wishOnly = infos.filter(l => !(l.price > 0) && l.single && askPrice(l.wishlist) > 0).length;
     let live = null;
@@ -2094,7 +2117,9 @@
       ibCount: ib.length,
       singles: singles.slice(0, TP_SHOW_LOTS),
       singleCount: singles.length,
-      bundleCount: ib.length - singles.length,
+      multis: multis.slice(0, TP_SHOW_LOTS),
+      multiCount: multis.length,
+      bundleCount: ib.length - singles.length - multis.length,
       contentsKnown: ib.every(l => l.known),
       morePages: more === true,
       saved
@@ -2192,10 +2217,14 @@
     const ref = oursRef || idbPrice;
     const vs = oursRef ? 'ours' : 'itemdb';
     let body;
-    if (r.singles.length) {
-      const best = r.singles[0];
+    const shown = (r.singles || []).concat(r.multis || [])
+      .sort((a, b) => (a.multi ? a.each : a.price) - (b.multi ? b.each : b.price)).slice(0, TP_SHOW_LOTS);
+    if (shown.length) {
+      const best = r.singles.length ? r.singles[0] : shown[0];
+      const bestPx = best.multi ? best.each : best.price;
       const watchedLots = getWatch().lots;
-      const rows = r.singles.map(l => {
+      const rows = shown.map(l => {
+        const px = l.multi ? l.each : l.price;
         const open = l.link ? `<a href="${escHtml(l.link)}" target="_blank" rel="noopener" title="Open lot">↗</a>` : '';
         const on = l.lotId && watchedLots[l.lotId];
         const watch = l.lotId
@@ -2203,8 +2232,8 @@
           : '';
         return `
           <div class="idb-tp-lot">
-            <span class="idb-tp-lot-price">${formatNP(l.price)} NP</span>
-            ${pctBadge(l.price, ref, vs)}
+            <span class="idb-tp-lot-price">${formatNP(px)} NP${l.multi ? ` <span class="idb-ours-dim" title="${l.count} in one lot for ${formatNP(l.price)} NP">each ×${l.count}</span>` : ''}</span>
+            ${pctBadge(px, ref, vs)}
             <span class="idb-tp-lot-who">${sellerLinks(l.owner)}${l.lotId ? ' <span class="idb-tp-lotid">#' + escHtml(l.lotId) + '</span>' : ''}</span>
             ${ageTag(l)}
             ${watch}
@@ -2214,6 +2243,7 @@
 
       const notes = [];
       notes.push(`${r.singleCount} single-item IB lot${r.singleCount === 1 ? '' : 's'}`);
+      if (r.multiCount) notes.push(`${r.multiCount} multi-quantity lot${r.multiCount === 1 ? '' : 's'} (price each)`);
       if (r.bundleCount) notes.push(`${r.bundleCount} bundle${r.bundleCount === 1 ? '' : 's'} hidden`);
       if (r.morePages) notes.push(`first page only — ↗ opens the full search`);
       if (!r.contentsKnown) notes.push(`bundle check unverified`);
@@ -2221,9 +2251,9 @@
 
       body = `
         <div>
-          <span class="idb-tp-price">${formatNP(best.price)}</span>
-          <span class="idb-tp-np">NP</span>
-          ${pctBadge(best.price, ref, vs)}
+          <span class="idb-tp-price">${formatNP(bestPx)}</span>
+          <span class="idb-tp-np">NP${best.multi ? ' each' : ''}</span>
+          ${pctBadge(bestPx, ref, vs)}
           ${ageTag(best)}
         </div>
         <div class="idb-tp-list">${rows}</div>
@@ -2244,7 +2274,7 @@
     live.querySelectorAll('.idb-tp-watch').forEach(btn => {
       btn.addEventListener('click', (ev) => {
         ev.preventDefault();
-        const lot = r.singles.find(l => l.lotId === btn.dataset.lot);
+        const lot = shown.find(l => l.lotId === btn.dataset.lot);
         if (!lot) return;
         const on = toggleWatchLot(lot, itemName, idbPrice);
         btn.classList.toggle('on', on);

@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.23.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.24.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -34,6 +34,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
   4. **⚠ warning** next to "itemdb X NP" when ours is >2× or <½ itemdb (`oursWarn`).
   Graph: trade = lavender, trade gone = teal. Test (HCWP): History + Check TP → 4.15m; History, no check → 4.55m; neither → 13.4m with ⚠ 3.2× itemdb.
 
+- 1.24.0 — **Your Stock** "Worth" shows both itemdb and ours (gain/loss follows the card's price). **Quantity badge confirmed** (Ben's paste): `.item-count` inside the `.relative` beside the image — passive capture reads it first. **Posted date**: passive lots dated from "Posted N days/hours ago" (`postedAgo`, approximate) instead of when seen. **🏝️ Check TP lists multi-quantity lots of the one item** as "X NP each ×N" (badge vs per-item price); they are kept OUT of the live rate (Ben agreed: bulk lots price differently). Result carries `multis`, `multiCount`; `tpLotContents` returns `same`.
+
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
 - `localStorage.pbp_price_settings` = `{ mode, minN, days, passive, minPx }`.
@@ -43,7 +45,7 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 `.tp-border-frame` → `p.text-cafeteria` "Lot N"; item rows `.flex.gap-4` with `p.item-name-text`; `p.wishlist-text`; an "Instant Buy" `p` (not inside a button) whose parent holds `p.text-museo-bold` "3,795,000 NP". The lot search link uses `criteria=id`, now confirmed.
 
 ## Unverified
-1. The quantity badge for lots holding several of one item (assumed digits inside the `.relative` next to the image). Otherwise rows are counted.
+1. ~~Quantity badge~~ confirmed in 1.24.0 (`.item-count`).
 2. That the TP landing page (no `type=` in the hash) is a browse view.
 3. Check TP response item field names (same `pick()` ladders as before).
 
