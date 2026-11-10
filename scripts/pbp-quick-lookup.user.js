@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.27.0
+// @version      1.27.1
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -1553,7 +1553,7 @@
     const full = typeof tpLotData !== 'undefined' && tpLotData.get(String(lotNum));
     // A "Show more" control means the box is hiding items (it shows 15)
     const partial = !full && [...box.querySelectorAll('button, a, p, span')]
-      .some(el => /^(show|view|see)\s+(more|all)/i.test(clean(el.textContent)) && !/details|offers/i.test(el.textContent));
+      .some(el => /^(and more|(show|view|see)\s+(more|all))/i.test(clean(el.textContent)) && !/details|offers/i.test(el.textContent));
     return { id: lotNum, items: full ? full.items.map(x => ({ ...x })) : [...items.values()], full: !!full, partial,
       ib, wish: wishEl ? clean(wishEl.textContent) : '', posted: postedAgo(box) };
   }
@@ -1663,7 +1663,11 @@
     const set = getPriceSettings();
     if (!tpBrowseView()) return;
     const out = [];
+    for (const pop of document.querySelectorAll('.tp-popup')) {
+      try { readLotPopup(pop, set); } catch (e) { console.warn('[PBP Quick Lookup] lot popup:', e); }
+    }
     for (const box of document.querySelectorAll('.tp-border-frame')) {
+      if (box.closest('.tp-popup')) continue;          // the View Details popup reuses this class
       const m = clean(box.textContent).match(/\bLot\s*#?\s*(\d{3,12})/i);
       if (!m) continue;
       const tagged = box.dataset.pbpTag === m[1];
@@ -1682,6 +1686,56 @@
       out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty, t: lot.posted || 0 });
     }
     if (out.length) recordPrices(out);
+  }
+
+  // ── 1.27.1: View Details popup (Ben's paste, Nov 2026) ──
+  // .tp-popup .content.tp-border-frame → "Lot N"; a grid of cells (.grid > div) each with the
+  // item image, an optional .item-count badge and the name in a p; "Wishlist:" p + next p;
+  // the same Instant Buy row as the lot box. Every item is listed, so this is the full reading:
+  // saved to tpLotData (the box behind retags), tagged inside the popup, and recorded if one item.
+  function readLotPopup(pop, set) {
+    const content = pop.querySelector('.tp-border-frame') || pop;
+    const m = clean(content.textContent).match(/\bLot\s*#?\s*(\d{3,12})/i);
+    if (!m || content.dataset.pbpTag === m[1]) return;
+    const cells = content.querySelectorAll('.grid > div');
+    if (!cells.length) return;                          // still loading
+    const items = new Map();
+    for (const c of cells) {
+      const ps = c.querySelectorAll('p');
+      const name = ps.length ? clean(ps[ps.length - 1].textContent) : '';
+      if (!name) continue;
+      const cnt = c.querySelector('.item-count');
+      const qty = cnt ? (parseInt(clean(cnt.textContent), 10) || 1) : 1;
+      const k = itemKey(name);
+      const cur = items.get(k) || { name, qty: 0 };
+      cur.qty += qty;
+      items.set(k, cur);
+    }
+    if (!items.size) return;
+    content.dataset.pbpTag = m[1];
+    let ib = 0, wish = '';
+    for (const p of content.querySelectorAll('p')) {
+      const t = clean(p.textContent);
+      if (!ib && !p.closest('button') && t.toLowerCase() === 'instant buy') {
+        const mm = p.parentElement && clean(p.parentElement.textContent).match(/([\d,]+)\s*NP/i);
+        if (mm) ib = parseInt(mm[1].replace(/,/g, ''), 10) || 0;
+      }
+      if (!wish && /^wishlist:?$/i.test(t) && p.nextElementSibling) wish = clean(p.nextElementSibling.textContent);
+    }
+    const list = [...items.values()];
+    tpLotData.set(m[1], { items: list.map(x => ({ ...x })) });
+    const lot = { id: m[1], items: list, full: true, partial: false, ib, wish, posted: 0 };
+    tagLotBox(content, lot);
+    // The box behind it: retag with the full contents
+    document.querySelectorAll('.tp-border-frame').forEach(b => {
+      if (!b.closest('.tp-popup') && b.dataset.pbpTag === m[1]) delete b.dataset.pbpTag;
+    });
+    // One item type → save with the true quantity (dedup by lot number)
+    if (set.passive && list.length === 1) {
+      const price = ib > 0 ? ib : askPrice(wish);
+      const each = price ? price / list[0].qty : 0;
+      if (each && each >= set.minPx) recordPrices([{ name: list[0].name, p: each, k: ib > 0 ? 'ib' : 'ask', id: m[1], q: list[0].qty }]);
+    }
   }
 
   // ── 1.27.0: full lot contents from the TP's OWN data (Ben's choice) ──
@@ -1754,7 +1808,7 @@
   function tagLotBox(box, lot) {
     box.querySelectorAll('.pbp-lot-tag, .pbp-lot-pip').forEach(el => el.remove());
     const qty = lot.items.reduce((s, it) => s + it.qty, 0);
-    if (!lot.items.length || qty < 2) return;
+    if (!lot.items.length || (qty < 2 && !lot.partial)) return;
     const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
     const pct = (a, b) => { const v = Math.round((a - b) / b * 100); return `<span class="pbp-lt-pct ${v < 0 ? 'under' : v > 0 ? 'over' : ''}">${v > 0 ? '+' : ''}${v}%</span>`; };
     let html;
@@ -1778,7 +1832,7 @@
       }
       html = '🍕 ' + bits.join(' · ');
     }
-    if (lot.partial) html += ` <span class="pbp-lt-dim">· first ${qty} shown</span>`;
+    if (lot.partial) html = `🍕 first ${qty} item${qty === 1 ? '' : 's'} shown <span class="pbp-lt-dim">— open View Details for the full reading</span>`;
     const tag = document.createElement('div');
     tag.className = 'pbp-lot-tag';
     tag.innerHTML = html;
@@ -1788,6 +1842,13 @@
     let ibLabel = null;
     for (const p of box.querySelectorAll('p')) {
       if (!p.closest('button') && clean(p.textContent).toLowerCase() === 'instant buy') { ibLabel = p; break; }
+    }
+    // View Details popup grows to fit: put the tag straight under the Instant Buy / wishlist block
+    if (box.closest('.tp-popup')) {
+      const blocks = box.querySelectorAll(':scope > .border-t');
+      const after = (ibLabel && ibLabel.closest('.border-t')) || blocks[blocks.length - 1];
+      if (after) { tag.classList.add('in-popup'); after.insertAdjacentElement('afterend', tag); }
+      return;
     }
     if (bottom) {
       box.insertBefore(tag, bottom);
@@ -1826,6 +1887,7 @@
     const st = document.createElement('style');
     st.textContent = `
       .pbp-lot-pip { cursor: help; }
+      .pbp-lot-tag.in-popup { margin: 4px 12px 8px; font-size: 13px; }
       .pbp-pip-pop { position: fixed; z-index: 2147483000; margin: 0; max-width: 300px; pointer-events: none;
         box-shadow: 0 3px 10px rgba(0,0,0,.35); }
       .pbp-lot-tag { margin: 0 12px 6px; padding: 4px 8px; border-radius: 6px; background: #2b2b2b; color: #f2e6c8;

@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.27.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.27.1 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -43,6 +43,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 - 1.26.1 — Ben: tag pushed "View Details" out of the fixed-height box. Tag now sits outside the white card, just before the bottom `.mt-auto` block ("No Offers Yet…"), using its slack space. If the bottom block then overflows the box, the tag is removed and a ` 🍕` with the same text as a hover title is appended to the "Instant Buy" label (or the wishlist). The fit check relies on live layout (not testable in jsdom).
 
 - 1.27.0 — (1) **Full lot contents from the TP's own data** (Ben chose this over reading the View More popup): an inline `<script>` hook wraps the page's `fetch`/XHR for URLs containing `tradingpost` and re-sends the response text as a `pbp-tp-data` CustomEvent → `captureTPData` → `tpLotData` (lotId → items with qty; same `pick` ladders, unverified). `parseLotBox` prefers it (`lot.full`); without it, a "Show/View more" control marks `lot.partial` → tag adds "first N shown" and passive capture skips the lot. Known gaps: the page's first load happens before the script runs (fallback to screen until the next page/search); if Neopets' CSP blocks inline scripts, the hook silently does nothing. (2) **🍕 pip hover** is our own fixed popup (`.pbp-pip-pop`): native title tooltips didn't show on the TP. (3) **Ctrl+click item names**: TP `.item-name-text`, or short text in the same small block (≤4 item images within 3 ancestors) as an item image; menus/userlookup links untouched.
+
+- 1.27.1 — from Ben's full-page paste: a lot box shows a few items then `p` "and more..." (now detected as `partial` → tag reads "first N items shown — open View Details for the full reading", lot not saved). **View Details popup** (`.tp-popup` → `.content.tp-border-frame`, `.grid > div` cells: img, optional `.item-count`, name in last `p`; "Wishlist:" p + next p; same Instant Buy row) is read by `readLotPopup`: full items → `tpLotData`, tag inside the popup under the IB block (`.in-popup`), the box behind retags, one-item lots saved with true qty. Popup frames are skipped by the box loop (they reuse `tp-border-frame`). Test on the paste: Nerkmid lot 448515782 box said ×6 at 255,500; popup reads ×30 at 51,100. The 1.27.0 page-data hook showed no effect in this paste (first load or CSP) — kept as a bonus.
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
