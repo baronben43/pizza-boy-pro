@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.22.0
+// @version      1.23.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -671,6 +671,7 @@
     #idb-tooltip .idb-ours-body { flex: 1; }
     #idb-tooltip .idb-ours-body b { color: #ffffff; }
     #idb-tooltip .idb-ours-dim { color: #888888; }
+    #idb-tooltip .idb-ours-warn { color: #ff9f6b; font-weight: bold; cursor: help; }
     #idb-tooltip .idb-seller-masked { color: #888888; cursor: help; }
     #idb-tooltip .idb-seller-guess { color: #999999; margin-right: 1px; cursor: help; }
     #idb-tooltip .idb-ours-thin { color: #999999; border-bottom: 1px dotted #777777; cursor: help; }
@@ -880,7 +881,7 @@
            <span class="idb-np">NP</span>
            ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours</span>` : ''}
          </div>
-         ${useOurs && !oursOnly ? `<div class="idb-meta">itemdb ${idbPrice ? formatNP(idbPrice) + ' NP' : '—'}</div>` : ''}
+         ${useOurs && !oursOnly ? `<div class="idb-meta idb-idb-ref" data-idb="${idbPrice || 0}">itemdb ${idbPrice ? formatNP(idbPrice) + ' NP' : '—'}${oursWarn(price, idbPrice)}</div>` : ''}
          ${oursOnly && ours.price == null ? `<div class="idb-meta">older than ${set.days} days</div>` : ''}`;
     } else {
       priceHtml = `<div class="idb-meta">No price data available</div>`;
@@ -1119,8 +1120,13 @@
       if (!x || !x.name || !(x.p > 0)) continue;
       const key = itemKey(x.name);
       const rec = log.items[key] || (log.items[key] = { name: clean(x.name), u: now, e: [] });
-      if (x.id && rec.e.some(e => e.id === String(x.id))) continue;
-      const e = { p: Math.round(x.p), t: x.t > 0 ? x.t : now, k: ['ask', 'auc'].includes(x.k) ? x.k : 'ib' };
+      const dup = x.id ? rec.e.find(e => e.id === String(x.id)) : null;
+      if (dup) {
+        // A lot we saw listed that has since gone from the TP → likely bought
+        if (x.k === 'gone' && (dup.k === 'ib' || dup.k === 'trd')) { dup.k = 'gone'; rec.u = now; added++; }
+        continue;
+      }
+      const e = { p: Math.round(x.p), t: x.t > 0 ? x.t : now, k: ['ask', 'auc', 'trd', 'gone'].includes(x.k) ? x.k : 'ib' };
       if (x.id) e.id = String(x.id);
       if (x.q > 1) e.q = x.q;
       rec.e.push(e);
@@ -1150,41 +1156,55 @@
     return saved.concat(sold).sort((a, b) => a.t - b.t);
   }
 
-  const isSold = e => e.k === 'sold' || e.k === 'auc';
+  // Kinds: ib / ask (TP lots seen), trd (itemdb trade, maybe still listed), gone (itemdb trade
+  // no longer on the TP → likely bought), auc (sold auction), sold (your Tracker sale)
+  const isSold = e => e.k === 'sold' || e.k === 'auc' || e.k === 'gone';
+  const isAsk  = e => e.k === 'ib' || e.k === 'ask' || e.k === 'trd' || e.k === 'gone';
+  const entryWt = e => (e.k === 'sold' || e.k === 'auc' ? 2 : 1) * (e.dw || 1);
 
-  // Weighted median: sold prices (your sales, auctions) count double
+  // Weighted median: your sales and sold auctions count double; e.dw = age discount
   function wMedian(pool) {
-    const w = pool.map(e => ({ p: e.p, wt: isSold(e) ? 2 : 1 })).sort((a, b) => a.p - b.p);
+    const w = pool.map(e => ({ p: e.p, wt: entryWt(e) })).sort((a, b) => a.p - b.p);
     const total = w.reduce((s, x) => s + x.wt, 0);
     let acc = 0;
     for (const x of w) { acc += x.wt; if (acc >= total / 2) return { price: x.p, weight: total }; }
     return { price: null, weight: 0 };
   }
 
-  // 1.22.0 — our price is a blend (fair value), so a live lot can be judged against it:
-  //   sold  : weighted median of recent sold prices (your sales + sold auctions);
-  //           full weight from minN sales, less with fewer
-  //   live  : cheapest instant buy from a 🏝️ Check TP in the last few minutes, only when every
-  //           priced single lot was IB; one lowball >25% under the next is skipped
-  //   asks  : 25th percentile of recent asks (IB + clear wishlist asks) — the cheap end,
-  //           because overpriced lots sit unsold
+  // 1.23.0 — our price is a blend (fair value), so a live lot can be judged against it:
+  //   sold  : weighted median of sold prices (your sales, sold auctions, gone trades) in `days`;
+  //           with fewer than minN, reaches back SOLD_LOOKBACK_DAYS at half weight.
+  //           Full blend weight from minN (effective) sales, less with fewer
+  //   live  : cheapest IB from a 🏝️ Check TP in the last few minutes — needs LIVE_MIN_LOTS
+  //           single lots, all IB; one lowball >25% under the next is skipped
+  //   asks  : 25th percentile of asks in `days` (TP IB + wishlist asks + itemdb trades) —
+  //           the cheap end, because overpriced lots sit unsold
   // Weights live in ⚙ (default 50/30/20); missing parts share their weight.
-  const OURS_METHOD = { blend: 'blend' };
+  const SOLD_LOOKBACK_DAYS = 90;
+  const LIVE_MIN_LOTS = 3;
   const OURS_METHOD_TIP = { blend: 'Blend of sold prices, the live Trading Post and recent asks — see ⚙ for the mix' };
   function lowQuartile(nums) {
     const a = nums.slice().sort((x, y) => x - y);
     return a.length ? a[Math.max(0, Math.ceil(a.length * 0.25) - 1)] : null;
   }
-  function blendOurPrice(pool, live, set) {
-    const sold = pool.filter(isSold);
-    const asks = pool.filter(e => !isSold(e)).map(e => e.p);
+  function blendOurPrice(all, live, set, now = Date.now()) {
+    const since = now - set.days * 86400000;
+    let sold = all.filter(e => isSold(e) && e.t >= since);
+    let soldN = sold.length;
+    if (soldN < set.minN) {
+      const far = now - SOLD_LOOKBACK_DAYS * 86400000;
+      const older = all.filter(e => isSold(e) && e.t < since && e.t >= far).map(e => ({ ...e, dw: 0.5 }));
+      sold = sold.concat(older);
+      soldN += older.length * 0.5;
+    }
+    const asks = all.filter(e => isAsk(e) && e.t >= since).map(e => e.p);
     const parts = {
       sold: sold.length ? wMedian(sold).price : null,
       live: live ? live.price : null,
       asks: asks.length ? lowQuartile(asks) : null
     };
     const w = {
-      sold: parts.sold != null ? set.wSold * Math.min(1, sold.length / Math.max(1, set.minN)) : 0,
+      sold: parts.sold != null ? set.wSold * Math.min(1, soldN / Math.max(1, set.minN)) : 0,
       live: parts.live != null ? set.wLive : 0,
       asks: parts.asks != null ? set.wAsks : 0
     };
@@ -1205,7 +1225,7 @@
     const pool = all.filter(e => e.t >= since);
     const weight = wMedian(pool).weight;
     const live = liveTPRate(name);
-    const pick = blendOurPrice(pool, live, set);
+    const pick = blendOurPrice(all, live, set);
     return {
       price: pick.price,
       method: pick.method,
@@ -1213,8 +1233,8 @@
       weight,
       n: pool.length,
       sold: pool.filter(isSold).length,
-      enough: pick.price != null && (!!live || weight >= set.minN),
-      oldPrice: all.length ? blendOurPrice(all, null, set).price : null,   // fallback for Ours only
+      enough: pick.price != null && (!!live || weight >= set.minN || (pick.parts.sold != null && pick.parts.asks != null)),
+      oldPrice: all.length ? blendOurPrice(all, null, { ...set, days: 36500 }).price : null,   // fallback for Ours only
       total: all.length,
       last: all.length ? all[all.length - 1].t : null
     };
@@ -1311,6 +1331,15 @@
   // switches over on the next lookup)
   // 1.21.0: when ours is already the card's price, the main price updates in place too.
   // canSwitch: after a Check TP, ours may now qualify → redraw the card so it takes over.
+  // ⚠ when ours and itemdb disagree a lot (more than 2× either way) — thin or odd data
+  function oursWarn(ours, idb) {
+    if (!ours || !idb) return '';
+    const r = ours / idb;
+    if (r > 0.5 && r < 2) return '';
+    const txt = r >= 2 ? `${r >= 10 ? Math.round(r) : r.toFixed(1)}× itemdb` : `${Math.round(r * 100)}% of itemdb`;
+    return ` <span class="idb-ours-warn" title="Ours and itemdb disagree a lot — check 📜 History before buying">⚠ ${txt}</span>`;
+  }
+
   function refreshOursLine(name, canSwitch) {
     const card = getCard();
     const line = card.querySelector('.idb-ours-line');
@@ -1326,6 +1355,13 @@
     if ((using || only) && o.price != null) {
       const px = card.querySelector('.idb-price');
       if (px) px.textContent = formatNP(o.price);
+      const ref = card.querySelector('.idb-idb-ref');
+      if (ref) {
+        const idb = Number(ref.dataset.idb) || 0;
+        const old = ref.querySelector('.idb-ours-warn');
+        if (old) old.remove();
+        ref.insertAdjacentHTML('beforeend', oursWarn(o.price, idb));
+      }
     }
   }
 
@@ -1337,7 +1373,8 @@
 
   // ── Sparkline hover (1.20.0): snap to the nearest point by date, show price + date ──
   const lotUrl = id => `https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=${TP_LOT_CRITERIA}&search_string=${encodeURIComponent(id)}`;
-  const kindLabel = e => e.k === 'sold' ? 'your sale' : e.k === 'auc' ? 'auction sold' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
+  const kindLabel = e => e.k === 'sold' ? 'your sale' : e.k === 'auc' ? 'auction sold' : e.k === 'gone' ? 'trade gone (likely sold)'
+    : e.k === 'trd' ? 'itemdb trade' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
   function sparkDate(t, withTime) {
     const d = new Date(t);
     const date = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -1400,7 +1437,8 @@
     let html = `<div class="idb-hist-h">🍕 Our prices</div>`;
     const all = ourEntries(name);
     if (!all.length) return html + `<div class="idb-tp-none">Nothing saved yet. Browse the Trading Post, or press 🏝️ Check TP.</div>`;
-    const colour = e => e.k === 'sold' ? '#5fc48a' : e.k === 'auc' ? '#7fb5ff' : e.k === 'ask' ? '#ffd88a' : '#e8a800';
+    const colour = e => e.k === 'sold' ? '#5fc48a' : e.k === 'auc' ? '#7fb5ff' : e.k === 'ask' ? '#ffd88a'
+      : e.k === 'gone' ? '#6fd6c8' : e.k === 'trd' ? '#c8b4ec' : '#e8a800';
     if (all.length >= 2) {
       const W = 264, H = 46, pad = 4;
       const t0 = all[0].t, t1 = all[all.length - 1].t;
@@ -1411,7 +1449,7 @@
       const line = all.map(e => `${x(e.t).toFixed(1)},${y(e.p).toFixed(1)}`).join(' ');
       const dots = all.map(e => `<circle cx="${x(e.t).toFixed(1)}" cy="${y(e.p).toFixed(1)}" r="2.3" fill="${colour(e)}"/>`).join('');
       const hover = all.map(e => {
-        const lot = e.id && (e.k === 'ib' || e.k === 'ask') ? lotUrl(e.id) : '';
+        const lot = e.id && isAsk(e) && /^\d+$/.test(e.id) ? lotUrl(e.id) : '';
         return {
           x: x(e.t), y: y(e.p), c: colour(e), lot,
           h: `<b style="color:${colour(e)}">${formatNP(e.p)} NP</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kindLabel(e)} · ${escHtml(sparkDate(e.t, true))}${lot ? ` · #${escHtml(e.id)} ↗` : ''}`,
@@ -1421,10 +1459,10 @@
           <polyline points="${line}" fill="none" stroke="#e8a800" stroke-opacity="0.45" stroke-width="1.2"/>
           ${dots}`) + `
         <div class="idb-tp-note">low ${formatNP(lo)} · high ${formatNP(hi)} · ${all.length} since ${escHtml(new Date(t0).toLocaleDateString())} ·
-          <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#7fb5ff">●</span> auction <span style="color:#5fc48a">●</span> your sale</div>`;
+          <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#7fb5ff">●</span> auction <span style="color:#c8b4ec">●</span> trade <span style="color:#6fd6c8">●</span> trade gone <span style="color:#5fc48a">●</span> your sale</div>`;
     }
     const rows = all.slice(-8).reverse().map(e => {
-      const lot = e.id && (e.k === 'ib' || e.k === 'ask')
+      const lot = e.id && isAsk(e) && /^\d+$/.test(e.id)
         ? ` <a href="${lotUrl(e.id)}" target="_blank" rel="noopener">#${escHtml(e.id)}</a>`
         : '';
       return `<div class="idb-own-item"><span><b style="color:${colour(e)}">${formatNP(e.p)}</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kindLabel(e)}${lot}</span><span>${agoMs(e.t)}</span></div>`;
@@ -1542,6 +1580,36 @@
       if (!a.hasBuyer || a.isNF || !price || !Number.isFinite(t)) continue;
       const id = pick(a, ['auction_id', 'auctionId', 'auction_number', 'id']);
       out.push({ name: itemName, p: price, k: 'auc', t, id: 'auc:' + (id != null ? id : `${t}-${price}`) });
+    }
+    return recordPrices(out);
+  }
+
+  // ── 📜 History: save itemdb's priced one-item trades (1.23.0) ──
+  // If a fresh 🏝️ Check TP is on hand and the lot isn't listed any more, it's "gone" (likely
+  // bought) and counts as a sale. Lots priced above the checked page are only judged when the
+  // check covered every page. The trade id field is unverified → falls back to time+price.
+  function recordTrades(itemName, d) {
+    const recent = d && Array.isArray(d.recent) ? d.recent : [];
+    const c = tpCache.get(itemName.toLowerCase());
+    const chk = c && Date.now() - c.ts < TP_CACHE_TTL ? c.result : null;
+    const listed = chk && chk.lotIds ? new Set(chk.lotIds.map(String)) : null;
+    const target = itemName.toLowerCase();
+    const out = [];
+    for (const tr of recent) {
+      const items = Array.isArray(tr.items) ? tr.items : [];
+      if (!tr.priced || items.length !== 1) continue;
+      const it = items[0];
+      if (String(it.name || '').toLowerCase() !== target) continue;
+      if ((Number(pick(it, ['quantity', 'qty', 'amount'])) || 1) !== 1) continue;
+      const price = Number(it.price) || 0;
+      const t = Date.parse(tr.addedAt);
+      if (!price || !Number.isFinite(t)) continue;
+      const rawId = pick(tr, ['trade_id', 'tradeId', 'lot_id', 'lotId', 'id']);
+      const id = rawId != null ? String(rawId) : `trd:${t}-${price}`;
+      let k = 'trd';
+      if (listed && rawId != null && Date.now() - t > 3600000 && !listed.has(id) &&
+          (!chk.morePages || price <= chk.maxPrice)) k = 'gone';
+      out.push({ name: itemName, p: price, k, t, id });
     }
     return recordPrices(out);
   }
@@ -2011,7 +2079,7 @@
     // Going rate: only when every priced single lot is instant buy (no wishlist-only asks)
     const wishOnly = infos.filter(l => !(l.price > 0) && l.single && askPrice(l.wishlist) > 0).length;
     let live = null;
-    if (singles.length && !wishOnly) {
+    if (singles.length >= LIVE_MIN_LOTS && !wishOnly) {
       const lowball = singles.length > 1 && singles[0].price < singles[1].price * 0.75;
       live = { price: (lowball ? singles[1] : singles[0]).price, n: singles.length, skipped: lowball };
     }
@@ -2019,6 +2087,8 @@
     const result = {
       live,
       owners,
+      lotIds: infos.map(l => l.lotId).filter(Boolean),
+      maxPrice: ib.length ? ib[ib.length - 1].price : 0,
       anyDated: ib.some(l => l.listedAt),
       totalLots: lots.length,
       ibCount: ib.length,
@@ -2370,6 +2440,7 @@
     histFetch(itemName).then(h => {
       let saved = 0;
       if (h.auctions.ok) { try { saved = recordAuctions(itemName, h.auctions.v); } catch (e) { console.warn('[PBP Quick Lookup] auctions:', e); } }
+      if (h.trades.ok) { try { saved += recordTrades(itemName, h.trades.v); } catch (e) { console.warn('[PBP Quick Lookup] trades:', e); } }
       const live = getCard().querySelector('.idb-hist');
       if (!live || live.dataset.item !== itemName) return;
       if (saved) refreshOursLine(itemName);

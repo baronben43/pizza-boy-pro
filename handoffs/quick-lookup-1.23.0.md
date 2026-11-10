@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.22.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.23.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -26,6 +26,13 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
   Hidden itemdb names (`tay***`): grey text, no links; if the prefix matches exactly one owner from this item's Check TP (`result.owners` → `knownSellers`), shows `≈fullname` with all links. Partial masks were never handled before (the Tracker only greys fully masked `*****`).
 
 - 1.22.0 — Ben: 1.21.0's "cheapest IB" made Ours useless for judging a buy (lowest lot vs itself = 0%). Ours is now a **blend** (`blendOurPrice`): sold median × wSold (scaled by sales/minN), live TP floor × wLive, low-asks P25 × wAsks; missing parts share weight. Weights in ⚙ (`wSold/wLive/wAsks`, default 50/30/20) so Ben can tune on live items before we fix them. Ours line shows the parts, e.g. `1.12m (sold 1m · live 1.1m · asks 1.25m)`. Check TP % badges compare to ours when ours is the card price ("vs ours" in the title), else itemdb. Void Paint Brush: 1.12m with a fresh Check TP, 1.14m without. Being trialled over a couple of builds.
+
+- 1.23.0 — after Highland Chia War Paint (Ours 16.6m from 2 overpriced lots vs itemdb 4.2m; real trades 4.0–5.5m):
+  1. **live** needs ≥ `LIVE_MIN_LOTS` (3) single IB lots.
+  2. **sold** reaches back `SOLD_LOOKBACK_DAYS` (90) at half weight (`e.dw`) when fewer than minN in `days`.
+  3. **itemdb trades saved on 📜 History** (`recordTrades`): priced one-item, qty-1 trades → `k:'trd'` (counts as an ask), or `k:'gone'` (counts as a sale at weight 1 and as an ask) when a fresh Check TP doesn't list the lot (and the check covered that price: `!morePages || price <= maxPrice`). An existing `ib`/`trd` entry with the same id is upgraded to `gone`. Check TP result now carries `lotIds`, `maxPrice`. **Unverified:** the trade id field (`trade_id/tradeId/lot_id/lotId/id`); without an id, entries use `trd:<t>-<price>`, can't become `gone`, and can duplicate an `ib` entry.
+  4. **⚠ warning** next to "itemdb X NP" when ours is >2× or <½ itemdb (`oursWarn`).
+  Graph: trade = lavender, trade gone = teal. Test (HCWP): History + Check TP → 4.15m; History, no check → 4.55m; neither → 13.4m with ⚠ 3.2× itemdb.
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
