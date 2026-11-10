@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.21.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.22.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -24,6 +24,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
   3. **low asks**: otherwise 25th percentile of IB + wishlist asks (Ben: wishlists must count, esp. 20m+ items where IB is rare).
   Old method (weighted median of everything) overpriced: overpriced lots sit unsold, so all-asks median ≈ middle of the asking range (Void Paint Brush: 1.4m vs live 1.1m). `refreshOursLine(name, canSwitch)` now updates the main price in place when ours is in use, and after Check TP redraws the card if ours newly qualifies.
   Hidden itemdb names (`tay***`): grey text, no links; if the prefix matches exactly one owner from this item's Check TP (`result.owners` → `knownSellers`), shows `≈fullname` with all links. Partial masks were never handled before (the Tracker only greys fully masked `*****`).
+
+- 1.22.0 — Ben: 1.21.0's "cheapest IB" made Ours useless for judging a buy (lowest lot vs itself = 0%). Ours is now a **blend** (`blendOurPrice`): sold median × wSold (scaled by sales/minN), live TP floor × wLive, low-asks P25 × wAsks; missing parts share weight. Weights in ⚙ (`wSold/wLive/wAsks`, default 50/30/20) so Ben can tune on live items before we fix them. Ours line shows the parts, e.g. `1.12m (sold 1m · live 1.1m · asks 1.25m)`. Check TP % badges compare to ours when ours is the card price ("vs ours" in the title), else itemdb. Void Paint Brush: 1.12m with a fresh Check TP, 1.14m without. Being trialled over a couple of builds.
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.

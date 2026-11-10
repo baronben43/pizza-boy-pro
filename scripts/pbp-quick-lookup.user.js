@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.21.0
+// @version      1.22.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -878,7 +878,7 @@
       priceHtml = `<div class="idb-price-row">
            <span class="idb-price">${formatNP(price)}</span>
            <span class="idb-np">NP</span>
-           ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours${ours.price != null && ours.method ? ' · ' + OURS_METHOD[ours.method] : ''}</span>` : ''}
+           ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours</span>` : ''}
          </div>
          ${useOurs && !oursOnly ? `<div class="idb-meta">itemdb ${idbPrice ? formatNP(idbPrice) + ' NP' : '—'}</div>` : ''}
          ${oursOnly && ours.price == null ? `<div class="idb-meta">older than ${set.days} days</div>` : ''}`;
@@ -1059,7 +1059,7 @@
   const PRICE_SET_KEY = 'pbp_price_settings';
   const PRICE_MAX_PER_ITEM = 50;
   const PRICE_MAX_ITEMS = 5000;
-  const PRICE_DEFAULTS = { mode: 'ours-first', minN: 3, days: 14, passive: true, minPx: 1000000 };
+  const PRICE_DEFAULTS = { mode: 'ours-first', minN: 3, days: 14, passive: true, minPx: 1000000, wSold: 50, wLive: 30, wAsks: 20 };
   const PRICE_MODES = { 'idb': 'itemdb only', 'ours-first': 'Ours first', 'ours-only': 'Ours only' };
 
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
@@ -1073,6 +1073,10 @@
     out.days = Math.max(1, parseInt(out.days, 10) || PRICE_DEFAULTS.days);
     out.passive = out.passive !== false;
     out.minPx = Math.max(0, parseInt(out.minPx, 10) || 0);
+    for (const k of ['wSold', 'wLive', 'wAsks']) {
+      const v = parseInt(out[k], 10);
+      out[k] = Number.isFinite(v) && v >= 0 ? v : PRICE_DEFAULTS[k];
+    }
     return out;
   }
   function savePriceSettings(s) { try { localStorage.setItem(PRICE_SET_KEY, JSON.stringify(s)); } catch {} }
@@ -1157,29 +1161,38 @@
     return { price: null, weight: 0 };
   }
 
-  // 1.21.0 — which price we trust, in order:
-  //   live : a 🏝️ Check TP in the last few minutes where every priced single lot was instant buy
-  //          → the cheapest IB (skipping one lowball >25% under the next) is the going rate
-  //   sold : at least minN sold prices (your sales + sold auctions) → their median
-  //   asks : otherwise the 25th percentile of all asks (IB + clear wishlist asks). The cheap
-  //          end, because overpriced lots sit unsold while the cheap ones get bought.
-  const OURS_METHOD = { live: 'live TP', sold: 'sold', asks: 'low asks' };
-  const OURS_METHOD_TIP = {
-    live: 'Cheapest instant buy from your Trading Post check just now (every priced lot was instant buy)',
-    sold: 'Median of recent sold prices (your sales and sold auctions)',
-    asks: 'Cheap end (25th percentile) of recent asking prices, instant buy and wishlist'
-  };
+  // 1.22.0 — our price is a blend (fair value), so a live lot can be judged against it:
+  //   sold  : weighted median of recent sold prices (your sales + sold auctions);
+  //           full weight from minN sales, less with fewer
+  //   live  : cheapest instant buy from a 🏝️ Check TP in the last few minutes, only when every
+  //           priced single lot was IB; one lowball >25% under the next is skipped
+  //   asks  : 25th percentile of recent asks (IB + clear wishlist asks) — the cheap end,
+  //           because overpriced lots sit unsold
+  // Weights live in ⚙ (default 50/30/20); missing parts share their weight.
+  const OURS_METHOD = { blend: 'blend' };
+  const OURS_METHOD_TIP = { blend: 'Blend of sold prices, the live Trading Post and recent asks — see ⚙ for the mix' };
   function lowQuartile(nums) {
     const a = nums.slice().sort((x, y) => x - y);
     return a.length ? a[Math.max(0, Math.ceil(a.length * 0.25) - 1)] : null;
   }
-  function pickOurPrice(pool, minN) {
+  function blendOurPrice(pool, live, set) {
     const sold = pool.filter(isSold);
-    if (sold.length && sold.length >= minN) return { price: wMedian(sold).price, method: 'sold' };
     const asks = pool.filter(e => !isSold(e)).map(e => e.p);
-    if (asks.length) return { price: lowQuartile(asks), method: 'asks' };
-    if (sold.length) return { price: wMedian(sold).price, method: 'sold' };
-    return { price: null, method: null };
+    const parts = {
+      sold: sold.length ? wMedian(sold).price : null,
+      live: live ? live.price : null,
+      asks: asks.length ? lowQuartile(asks) : null
+    };
+    const w = {
+      sold: parts.sold != null ? set.wSold * Math.min(1, sold.length / Math.max(1, set.minN)) : 0,
+      live: parts.live != null ? set.wLive : 0,
+      asks: parts.asks != null ? set.wAsks : 0
+    };
+    const tw = w.sold + w.live + w.asks;
+    let price = null;
+    if (tw > 0) price = Math.round((w.sold * (parts.sold || 0) + w.live * (parts.live || 0) + w.asks * (parts.asks || 0)) / tw);
+    else price = parts.live != null ? parts.live : parts.sold != null ? parts.sold : parts.asks;   // all weights 0
+    return { price, parts, method: price != null ? 'blend' : null };
   }
   function liveTPRate(name) {
     const c = tpCache.get(String(name).toLowerCase());
@@ -1192,15 +1205,16 @@
     const pool = all.filter(e => e.t >= since);
     const weight = wMedian(pool).weight;
     const live = liveTPRate(name);
-    const pick = live ? { price: live.price, method: 'live' } : pickOurPrice(pool, set.minN);
+    const pick = blendOurPrice(pool, live, set);
     return {
       price: pick.price,
       method: pick.method,
+      parts: pick.parts,
       weight,
       n: pool.length,
       sold: pool.filter(isSold).length,
-      enough: pick.price != null && (pick.method === 'live' || weight >= set.minN),
-      oldPrice: all.length ? pickOurPrice(all, set.minN).price : null,   // fallback for Ours only
+      enough: pick.price != null && (!!live || weight >= set.minN),
+      oldPrice: all.length ? blendOurPrice(all, null, set).price : null,   // fallback for Ours only
       total: all.length,
       last: all.length ? all[all.length - 1].t : null
     };
@@ -1217,8 +1231,11 @@
 
   function renderOursLine(o, set, using, only) {
     let body;
-    const how = o.method ? ` <span class="idb-ours-dim" title="${OURS_METHOD_TIP[o.method]}">${OURS_METHOD[o.method]}</span>` : '';
-    if (o.method === 'live' && !o.total) {
+    const pp = o.parts || {};
+    const bits = [['sold', pp.sold], ['live', pp.live], ['asks', pp.asks]].filter(x => x[1] != null)
+      .map(([k, v]) => `${k} ${shortNP(v)}`);
+    const how = o.method && bits.length ? ` <span class="idb-ours-dim" title="${OURS_METHOD_TIP.blend}">(${bits.join(' · ')})</span>` : '';
+    if (o.price != null && !o.total) {
       body = `<b>${shortNP(o.price)}</b>${how}`;
     } else if (!o.total) {
       body = `<span class="idb-ours-dim">nothing saved yet</span>`;
@@ -1257,6 +1274,10 @@
       <div class="idb-tp-note">Ours first uses our price once we have at least
         <input class="idb-ours-num idb-ours-minn" type="number" min="1" value="${set.minN}"> prices in the last
         <input class="idb-ours-num idb-ours-days" type="number" min="1" value="${set.days}"> days. Sold counts double. Ours only never asks itemdb for a price.</div>
+      <div class="idb-tp-note">Mix (weights): sold
+        <input class="idb-ours-num idb-ours-wsold" type="number" min="0" value="${set.wSold}"> live TP
+        <input class="idb-ours-num idb-ours-wlive" type="number" min="0" value="${set.wLive}"> asks
+        <input class="idb-ours-num idb-ours-wasks" type="number" min="0" value="${set.wAsks}">. Missing parts share their weight; sold counts in full from ${set.minN} sales.</div>
       <div class="idb-watch-form-row">
         <label class="idb-ours-chk"><input class="idb-ours-passive" type="checkbox"${set.passive ? ' checked' : ''}> Save TP lots I browse</label>
       </div>
@@ -1275,7 +1296,10 @@
         minN: parseInt(form.querySelector('.idb-ours-minn').value, 10) || PRICE_DEFAULTS.minN,
         days: parseInt(form.querySelector('.idb-ours-days').value, 10) || PRICE_DEFAULTS.days,
         passive: form.querySelector('.idb-ours-passive').checked,
-        minPx: parseNPInput(form.querySelector('.idb-ours-minpx').value, set.minPx)
+        minPx: parseNPInput(form.querySelector('.idb-ours-minpx').value, set.minPx),
+        wSold: parseInt(form.querySelector('.idb-ours-wsold').value, 10),
+        wLive: parseInt(form.querySelector('.idb-ours-wlive').value, 10),
+        wAsks: parseInt(form.querySelector('.idb-ours-wasks').value, 10)
       });
       relookup(name);
     });
@@ -1302,8 +1326,6 @@
     if ((using || only) && o.price != null) {
       const px = card.querySelector('.idb-price');
       if (px) px.textContent = formatNP(o.price);
-      const tag = card.querySelector('.idb-src-tag');
-      if (tag && o.method) tag.textContent = 'ours · ' + OURS_METHOD[o.method];
     }
   }
 
@@ -2046,12 +2068,12 @@
   }
 
   // "-18%" badge vs the itemdb price. Green = cheaper than itemdb.
-  function pctBadge(tpPrice, idbPrice) {
+  function pctBadge(tpPrice, idbPrice, vs = 'itemdb') {
     if (!idbPrice || !tpPrice) return '';
     const pct = Math.round((tpPrice - idbPrice) / idbPrice * 100);
     const cls = pct < 0 ? 'under' : pct > 0 ? 'over' : 'even';
     const txt = pct > 0 ? `+${pct}%` : `${pct}%`;
-    return `<span class="idb-pct ${cls}" title="vs itemdb ${formatNP(idbPrice)} NP">${txt}</span>`;
+    return `<span class="idb-pct ${cls}" title="vs ${vs} ${formatNP(idbPrice)} NP">${txt}</span>`;
   }
 
   // 🏝️ Check TP pressed: search once (or reuse a result from the last few minutes)
@@ -2093,6 +2115,12 @@
     const live = getCard().querySelector('.idb-tp-row');
     if (!live || live.dataset.item !== itemName) return;
 
+    // Judge lots against our fair value when ours is the card's price, else itemdb
+    const oursLine = getCard().querySelector('.idb-ours-line');
+    const oursRef = oursLine && (oursLine.classList.contains('using') || /Ours only/.test(oursLine.textContent))
+      ? ourPrice(itemName).price : null;
+    const ref = oursRef || idbPrice;
+    const vs = oursRef ? 'ours' : 'itemdb';
     let body;
     if (r.singles.length) {
       const best = r.singles[0];
@@ -2106,7 +2134,7 @@
         return `
           <div class="idb-tp-lot">
             <span class="idb-tp-lot-price">${formatNP(l.price)} NP</span>
-            ${pctBadge(l.price, idbPrice)}
+            ${pctBadge(l.price, ref, vs)}
             <span class="idb-tp-lot-who">${sellerLinks(l.owner)}${l.lotId ? ' <span class="idb-tp-lotid">#' + escHtml(l.lotId) + '</span>' : ''}</span>
             ${ageTag(l)}
             ${watch}
@@ -2125,7 +2153,7 @@
         <div>
           <span class="idb-tp-price">${formatNP(best.price)}</span>
           <span class="idb-tp-np">NP</span>
-          ${pctBadge(best.price, idbPrice)}
+          ${pctBadge(best.price, ref, vs)}
           ${ageTag(best)}
         </div>
         <div class="idb-tp-list">${rows}</div>
