@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.19.0
+// @version      1.20.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -395,6 +395,24 @@
       margin-top: 4px;
       background: #2c2c2c;
       border-radius: 3px;
+    }
+    #idb-tooltip .idb-spark-wrap { position: relative; margin-top: 4px; cursor: crosshair; }
+    #idb-tooltip .idb-spark-wrap.lot { cursor: pointer; }
+    #idb-tooltip .idb-spark-wrap .idb-spark { margin-top: 0; }
+    #idb-tooltip .idb-spark-guide {
+      position: absolute; top: 0; bottom: 0; width: 1px;
+      background: rgba(255,255,255,0.22); pointer-events: none; display: none;
+    }
+    #idb-tooltip .idb-spark-dot {
+      position: absolute; width: 7px; height: 7px; border-radius: 50%;
+      border: 1.5px solid #fff; transform: translate(-50%, -50%);
+      pointer-events: none; display: none; box-sizing: border-box;
+    }
+    #idb-tooltip .idb-spark-tip {
+      position: absolute; bottom: 100%; margin-bottom: 3px; z-index: 3;
+      background: #1b1b1b; border: 1px solid #555; border-radius: 3px;
+      color: #e6e6e6; font-size: 11px; line-height: 1.35; padding: 2px 6px;
+      white-space: nowrap; pointer-events: none; display: none;
     }
     #idb-tooltip .idb-ssw-btn.hist { background: #5a5a5a; }
     #idb-tooltip .idb-pct {
@@ -1246,6 +1264,66 @@
     fetchPrice(name, lastX, lastY, forceIdb);
   }
 
+  // ── Sparkline hover (1.20.0): snap to the nearest point by date, show price + date ──
+  const lotUrl = id => `https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=${TP_LOT_CRITERIA}&search_string=${encodeURIComponent(id)}`;
+  const kindLabel = e => e.k === 'sold' ? 'your sale' : e.k === 'auc' ? 'auction sold' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
+  function sparkDate(t, withTime) {
+    const d = new Date(t);
+    const date = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    return withTime ? `${date}, ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : date;
+  }
+  // pts: [{ x, y (viewBox units), h (readout HTML), c (dot colour), lot (url or '') }]
+  function sparkWrap(W, H, pts, inner) {
+    const data = escHtml(JSON.stringify({ W, H, pts: pts.map(p => ({ ...p, x: +p.x.toFixed(1), y: +p.y.toFixed(1) })) }));
+    return `
+        <div class="idb-spark-wrap" data-spark="${data}">
+          <svg class="idb-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${inner}
+          </svg>
+          <div class="idb-spark-guide"></div><div class="idb-spark-dot"></div><div class="idb-spark-tip"></div>
+        </div>`;
+  }
+  let sparkActive = null;
+  function sparkHide(wrap) {
+    if (!wrap) return;
+    wrap.classList.remove('lot');
+    wrap._pt = null;
+    wrap.querySelectorAll('.idb-spark-guide, .idb-spark-dot, .idb-spark-tip').forEach(el => { el.style.display = 'none'; });
+  }
+  function sparkMove(wrap, e) {
+    let d = wrap._spark;
+    if (!d) { try { d = wrap._spark = JSON.parse(wrap.dataset.spark); } catch (err) { return; } }
+    if (!d.pts || !d.pts.length) return;
+    const r = wrap.getBoundingClientRect();
+    if (!r.width) return;
+    const mx = (e.clientX - r.left) / r.width * d.W;
+    let pt = d.pts[0];
+    for (const p of d.pts) if (Math.abs(p.x - mx) < Math.abs(pt.x - mx)) pt = p;
+    wrap._pt = pt;
+    const lx = pt.x / d.W * 100, ty = pt.y / d.H * 100;
+    const guide = wrap.querySelector('.idb-spark-guide');
+    const dot = wrap.querySelector('.idb-spark-dot');
+    const tip = wrap.querySelector('.idb-spark-tip');
+    guide.style.left = lx + '%'; guide.style.display = 'block';
+    dot.style.left = lx + '%'; dot.style.top = ty + '%'; dot.style.background = pt.c || '#e8a800'; dot.style.display = 'block';
+    tip.innerHTML = pt.h;
+    tip.style.display = 'block';
+    // Anchor near the edges so the readout never spills out of the card
+    if (lx < 30)      { tip.style.left = '0';  tip.style.right = 'auto'; tip.style.transform = 'none'; }
+    else if (lx > 70) { tip.style.left = 'auto'; tip.style.right = '0'; tip.style.transform = 'none'; }
+    else              { tip.style.left = lx + '%'; tip.style.right = 'auto'; tip.style.transform = 'translateX(-50%)'; }
+    wrap.classList.toggle('lot', !!pt.lot);
+  }
+  tooltip.addEventListener('mousemove', (e) => {
+    const wrap = e.target.closest && e.target.closest('.idb-spark-wrap');
+    if (wrap !== sparkActive) { sparkHide(sparkActive); sparkActive = wrap; }
+    if (wrap) sparkMove(wrap, e);
+  });
+  tooltip.addEventListener('mouseleave', () => { sparkHide(sparkActive); sparkActive = null; });
+  tooltip.addEventListener('click', (e) => {
+    const wrap = e.target.closest && e.target.closest('.idb-spark-wrap');
+    if (wrap && wrap._pt && wrap._pt.lot) window.open(wrap._pt.lot, '_blank', 'noopener');
+  });
+
   // 📜 History: our own prices, shown above itemdb's
   function renderOurHistory(name) {
     let html = `<div class="idb-hist-h">🍕 Our prices</div>`;
@@ -1261,20 +1339,24 @@
       const y = v => H - pad - (H - 2 * pad) * ((v - lo) / Math.max(1, hi - lo));
       const line = all.map(e => `${x(e.t).toFixed(1)},${y(e.p).toFixed(1)}`).join(' ');
       const dots = all.map(e => `<circle cx="${x(e.t).toFixed(1)}" cy="${y(e.p).toFixed(1)}" r="2.3" fill="${colour(e)}"/>`).join('');
-      html += `
-        <svg class="idb-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      const hover = all.map(e => {
+        const lot = e.id && (e.k === 'ib' || e.k === 'ask') ? lotUrl(e.id) : '';
+        return {
+          x: x(e.t), y: y(e.p), c: colour(e), lot,
+          h: `<b style="color:${colour(e)}">${formatNP(e.p)} NP</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kindLabel(e)} · ${escHtml(sparkDate(e.t, true))}${lot ? ` · #${escHtml(e.id)} ↗` : ''}`,
+        };
+      });
+      html += sparkWrap(W, H, hover, `
           <polyline points="${line}" fill="none" stroke="#e8a800" stroke-opacity="0.45" stroke-width="1.2"/>
-          ${dots}
-        </svg>
+          ${dots}`) + `
         <div class="idb-tp-note">low ${formatNP(lo)} · high ${formatNP(hi)} · ${all.length} since ${escHtml(new Date(t0).toLocaleDateString())} ·
           <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#7fb5ff">●</span> auction <span style="color:#5fc48a">●</span> your sale</div>`;
     }
-    const kind = e => e.k === 'sold' ? 'your sale' : e.k === 'auc' ? 'auction sold' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
     const rows = all.slice(-8).reverse().map(e => {
       const lot = e.id && (e.k === 'ib' || e.k === 'ask')
-        ? ` <a href="https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=${TP_LOT_CRITERIA}&search_string=${encodeURIComponent(e.id)}" target="_blank" rel="noopener">#${escHtml(e.id)}</a>`
+        ? ` <a href="${lotUrl(e.id)}" target="_blank" rel="noopener">#${escHtml(e.id)}</a>`
         : '';
-      return `<div class="idb-own-item"><span><b style="color:${colour(e)}">${formatNP(e.p)}</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kind(e)}${lot}</span><span>${agoMs(e.t)}</span></div>`;
+      return `<div class="idb-own-item"><span><b style="color:${colour(e)}">${formatNP(e.p)}</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kindLabel(e)}${lot}</span><span>${agoMs(e.t)}</span></div>`;
     }).join('');
     return html + `<div class="idb-ours-list">${rows}</div>`;
   }
@@ -2159,11 +2241,13 @@
       change = `<span class="idb-pct ${cls}">${pct > 0 ? '+' : ''}${pct}% / 30d</span>`;
     }
 
-    html += `
-      <svg class="idb-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    const hover = pts.map(p => ({
+      x: x(p.t), y: y(p.v), c: p.inf ? '#e06060' : '#e8a800', lot: '',
+      h: `<b style="color:#e8a800">${formatNP(p.v)} NP</b> · ${escHtml(sparkDate(p.t, false))}${p.inf ? ' · <span style="color:#e06060">inflated</span>' : ''}`,
+    }));
+    html += sparkWrap(W, H, hover, `
         <polyline points="${line}" fill="none" stroke="#e8a800" stroke-width="1.5"/>
-        ${dots}
-      </svg>
+        ${dots}`) + `
       <div class="idb-tp-note">
         low ${formatNP(lo)} · high ${formatNP(hi)} · ${pts.length} points since ${escHtml(new Date(t0).toLocaleDateString())}
         ${change}${pts.some(p => p.inf) ? ' · <span style="color:#e06060">●</span> inflated' : ''}
