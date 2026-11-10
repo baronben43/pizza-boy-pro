@@ -16,6 +16,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 
 - 1.20.0 — graph hover: both 📜 History sparklines (🍕 Our prices and itemdb 📈 Price history) snap to the nearest point by date and show a readout with price and date. Ours adds kind (coloured), ×qty and time; itemdb adds "inflated". Clicking an Ours point from a TP lot opens that lot search. Built by `sparkWrap()` (points JSON in `data-spark`) plus delegated mousemove/mouseleave/click on the tooltip. No extra requests.
 
+- 1.20.1 — ✉️ Neomail link after 🏝️ 🔨 in `sellerLinks()` (Check TP, History auctions/trades); skipped for itemdb-masked names (contain `*`).
+
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
 - `localStorage.pbp_price_settings` = `{ mode, minN, days, passive, minPx }`.

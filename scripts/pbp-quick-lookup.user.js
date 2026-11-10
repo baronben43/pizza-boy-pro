@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.20.0
+// @version      1.20.1
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -1970,9 +1970,12 @@
     // TP is a Vue SPA that reads its search from the hash, not the query string.
     const trades   = `https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=owner&search_string=${u}`;
     const auctions = `https://www.neopets.com/genie.phtml?type=find_user&auction_username=${u}`;
+    const mail     = `https://www.neopets.com/neomessages.phtml?type=send&recipient=${u}`;
+    const masked   = owner.includes('*'); // itemdb hides some names — can't Neomail those
     return `<a class="idb-seller" href="${profile}" target="_blank" rel="noopener" title="${escHtml(owner)}'s profile">${escHtml(owner)}</a>`
          + `<a class="idb-seller-ico" href="${trades}" target="_blank" rel="noopener" title="${escHtml(owner)}'s Trading Post lots">🏝️</a>`
-         + `<a class="idb-seller-ico" href="${auctions}" target="_blank" rel="noopener" title="${escHtml(owner)}'s auctions">🔨</a>`;
+         + `<a class="idb-seller-ico" href="${auctions}" target="_blank" rel="noopener" title="${escHtml(owner)}'s auctions">🔨</a>`
+         + (masked ? '' : `<a class="idb-seller-ico" href="${mail}" target="_blank" rel="noopener" title="Neomail ${escHtml(owner)}">✉️</a>`);
   }
 
   // "-18%" badge vs the itemdb price. Green = cheaper than itemdb.
