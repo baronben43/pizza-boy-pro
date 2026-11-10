@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.26.1
+// @version      1.27.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -25,6 +25,8 @@
   //   • 🍕 Our prices: Trading Post lots already on the page you're viewing, and
   //     lots Check TP already fetched, are saved to your own price list in this
   //     browser — nothing extra is ever requested
+  //   • On Trading Post pages, the lot data the page itself downloads is read as it
+  //     arrives (full lot contents for the 🍕 tags) — again, nothing extra requested
 
   // ─── CONSTANTS ─────────────────────────────────────────────────────────────
   const TOOLTIP_ID = 'idb-tooltip';
@@ -1548,7 +1550,12 @@
       if (m) { ib = parseInt(m[1].replace(/,/g, ''), 10) || 0; if (ib) break; }
     }
     const wishEl = box.querySelector('.wishlist-text');
-    return { id: lotNum, items: [...items.values()], ib, wish: wishEl ? clean(wishEl.textContent) : '', posted: postedAgo(box) };
+    const full = typeof tpLotData !== 'undefined' && tpLotData.get(String(lotNum));
+    // A "Show more" control means the box is hiding items (it shows 15)
+    const partial = !full && [...box.querySelectorAll('button, a, p, span')]
+      .some(el => /^(show|view|see)\s+(more|all)/i.test(clean(el.textContent)) && !/details|offers/i.test(el.textContent));
+    return { id: lotNum, items: full ? full.items.map(x => ({ ...x })) : [...items.values()], full: !!full, partial,
+      ib, wish: wishEl ? clean(wishEl.textContent) : '', posted: postedAgo(box) };
   }
 
   // "Posted 2 days ago" / "Posted 5 hours ago" / "Posted yesterday" → ms timestamp (approximate)
@@ -1666,7 +1673,7 @@
       if (!tagged) { box.dataset.pbpTag = m[1]; try { tagLotBox(box, lot); } catch (e) { console.warn('[PBP Quick Lookup] lot tag:', e); } }
       if (!set.passive || seen) continue;
       box.dataset.pbpLot = m[1];
-      if (lot.items.length !== 1) continue;            // one item type only
+      if (lot.items.length !== 1 || lot.partial) continue;   // one item type only, all items known
       const it = lot.items[0];
       const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
       if (!price) continue;
@@ -1675,6 +1682,70 @@
       out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty, t: lot.posted || 0 });
     }
     if (out.length) recordPrices(out);
+  }
+
+  // ── 1.27.0: full lot contents from the TP's OWN data (Ben's choice) ──
+  // The TP page fetches every lot (all items + quantities) before drawing it, but a box only
+  // shows the first 15 items. A small hook in the page copies those responses to us (a
+  // CustomEvent), so tags and saved prices use the full lot. No extra requests: it only reads
+  // what the page already downloaded. The page's very first load can be missed (the script
+  // starts after it) — those boxes fall back to what's on screen.
+  const tpLotData = new Map();   // lotId → { items: [{ name, qty }] }
+  function captureTPData(data) {
+    const lots = data && Array.isArray(data.lots) ? data.lots : null;
+    if (!lots) return;
+    let n = 0;
+    for (const lot of lots) {
+      const id = pick(lot, ['lot_id', 'lotId', 'lot_number', 'id']);
+      const list = pick(lot, ['items', 'lot_items', 'lotItems', 'item_list', 'itemList', 'objects']);
+      if (id == null || !Array.isArray(list) || !list.length) continue;
+      const items = new Map();
+      for (const it of list) {
+        const name = clean(pick(it, ['name', 'item_name', 'itemName', 'obj_name']));
+        if (!name) continue;
+        const q = Number(pick(it, ['quantity', 'qty', 'amount', 'count'])) || 1;
+        const k = itemKey(name);
+        const cur = items.get(k) || { name, qty: 0 };
+        cur.qty += q;
+        items.set(k, cur);
+      }
+      if (!items.size) continue;
+      tpLotData.set(String(id), { items: [...items.values()] });
+      n++;
+    }
+    if (tpLotData.size > 3000) [...tpLotData.keys()].slice(0, tpLotData.size - 3000).forEach(k => tpLotData.delete(k));
+    if (n) {
+      // Retag boxes now that full contents are known
+      document.querySelectorAll('.tp-border-frame').forEach(b => { delete b.dataset.pbpTag; });
+      clearTimeout(scanTimer); scanTimer = setTimeout(scanTPPage, 150);
+    }
+  }
+  if (ON_TP) {
+    document.addEventListener('pbp-tp-data', (e) => {
+      try { captureTPData(JSON.parse(e.detail)); } catch {}
+    });
+    const hook = `(() => {
+      if (window.__pbpTPHook) return; window.__pbpTPHook = 1;
+      const hit = u => /tradingpost/i.test(String(u || ''));
+      const send = txt => { try { document.dispatchEvent(new CustomEvent('pbp-tp-data', { detail: String(txt) })); } catch (e) {} };
+      const f = window.fetch;
+      if (f) window.fetch = function (input, init) {
+        const p = f.apply(this, arguments);
+        try { const u = input && input.url ? input.url : input; if (hit(u)) p.then(r => r.clone().text()).then(send).catch(() => {}); } catch (e) {}
+        return p;
+      };
+      const open = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (m, u) {
+        if (hit(u)) this.addEventListener('load', function () { try { send(this.responseText); } catch (e) {} });
+        return open.apply(this, arguments);
+      };
+    })();`;
+    try {
+      const sc = document.createElement('script');
+      sc.textContent = hook;
+      (document.head || document.documentElement).appendChild(sc);
+      sc.remove();
+    } catch (e) { console.warn('[PBP Quick Lookup] TP hook:', e); }
   }
 
   // ── 1.26.0: per-item price tag on TP lot boxes (several items, or mixed lots) ──
@@ -1707,6 +1778,7 @@
       }
       html = '🍕 ' + bits.join(' · ');
     }
+    if (lot.partial) html += ` <span class="pbp-lt-dim">· first ${qty} shown</span>`;
     const tag = document.createElement('div');
     tag.className = 'pbp-lot-tag';
     tag.innerHTML = html;
@@ -1729,13 +1801,33 @@
     const pip = document.createElement('span');
     pip.className = 'pbp-lot-pip';
     pip.textContent = ' 🍕';
-    pip.title = clean(tag.textContent.replace(/^🍕\s*/, ''));
+    pip.dataset.pbpHtml = html.replace(/^🍕\s*/, '');
     host.appendChild(pip);
+  }
+  // Our own hover popup for the 🍕 pip (the TP page swallows native title tooltips)
+  if (ON_TP) {
+    let pop = null;
+    document.addEventListener('mouseover', (e) => {
+      const pip = e.target.closest && e.target.closest('.pbp-lot-pip');
+      if (!pip) { if (pop) { pop.remove(); pop = null; } return; }
+      if (pop && pop._pip === pip) return;
+      if (pop) pop.remove();
+      pop = document.createElement('div');
+      pop.className = 'pbp-lot-tag pbp-pip-pop';
+      pop._pip = pip;
+      pop.innerHTML = '🍕 ' + (pip.dataset.pbpHtml || '');
+      document.body.appendChild(pop);
+      const r = pip.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+      pop.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, r.left + r.width / 2 - w / 2)) + 'px';
+      pop.style.top = (r.top - h - 6 < 4 ? r.bottom + 6 : r.top - h - 6) + 'px';
+    });
   }
   if (ON_TP) {
     const st = document.createElement('style');
     st.textContent = `
       .pbp-lot-pip { cursor: help; }
+      .pbp-pip-pop { position: fixed; z-index: 2147483000; margin: 0; max-width: 300px; pointer-events: none;
+        box-shadow: 0 3px 10px rgba(0,0,0,.35); }
       .pbp-lot-tag { margin: 0 12px 6px; padding: 4px 8px; border-radius: 6px; background: #2b2b2b; color: #f2e6c8;
         font: 12px/1.35 Verdana, sans-serif; text-align: center; }
       .pbp-lot-tag b { color: #e8a800; }
@@ -3001,12 +3093,29 @@
     }
     return '';
   }
+  // 1.27.0: also an item NAME — TP .item-name-text, or short text sitting in the same small
+  // block as an item image (inventory/SDB/shop cells). Anything else keeps its normal Ctrl+click.
+  function nameForText(el) {
+    if (!el || !el.closest) return '';
+    const tp = el.closest('.item-name-text');
+    if (tp) return okName(tp.textContent);
+    if (el.closest('a[href*="userlookup"], nav, header, footer')) return '';
+    const own = okName(el.textContent);
+    if (!own || el.children.length > 3) return '';
+    for (let a = el.parentElement, i = 0; a && i < 3; a = a.parentElement, i++) {
+      const imgs = [...a.querySelectorAll('img')].filter(im => ITEM_IMG_RE.test(im.getAttribute('src') || ''));
+      if (imgs.length) return imgs.length <= 4 ? own : '';
+    }
+    return '';
+  }
+  function ctrlItemName(target) {
+    const img = itemImgAt(target);
+    return img ? nameForImg(img) : nameForText(target);
+  }
   document.addEventListener('click', function(e) {
     if (!(e.ctrlKey || e.metaKey) || e.button !== 0 || tooltip.contains(e.target)) return;
-    const img = itemImgAt(e.target);
-    if (!img) return;
-    const name = nameForImg(img);
-    if (!name) return;                       // can't tell the item → leave the click to the page
+    const name = ctrlItemName(e.target);
+    if (!name) return;                       // not an item → leave the click to the page
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -3017,7 +3126,7 @@
 
   document.addEventListener('mouseup', function(e) {
     if (tooltip.contains(e.target)) return;
-    if ((e.ctrlKey || e.metaKey) && itemImgAt(e.target)) return;   // handled by Ctrl+click
+    if ((e.ctrlKey || e.metaKey) && ctrlItemName(e.target)) return;   // handled by Ctrl+click
     if (e.target.closest && e.target.closest('.idb-calc')) return; // typing/selecting in a calculator
     // Small delay to let the browser finalise the selection
     setTimeout(() => {
@@ -3049,7 +3158,7 @@
   // Hide when clicking elsewhere (clicks in a calculator leave the card alone)
   document.addEventListener('mousedown', function(e) {
     if (!isShown()) return;
-    if ((e.ctrlKey || e.metaKey) && itemImgAt(e.target)) return;   // Ctrl+click swaps the card itself
+    if ((e.ctrlKey || e.metaKey) && ctrlItemName(e.target)) return;   // Ctrl+click swaps the card itself
     if (e.target.closest && e.target.closest('.idb-calc')) return;
     if (!tooltip.contains(e.target)) {
       if (isPinned()) closeTooltip(); else hideTooltip(100);
