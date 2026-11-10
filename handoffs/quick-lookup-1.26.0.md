@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.25.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.26.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -37,6 +37,8 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 - 1.24.0 — **Your Stock** "Worth" shows both itemdb and ours (gain/loss follows the card's price). **Quantity badge confirmed** (Ben's paste): `.item-count` inside the `.relative` beside the image — passive capture reads it first. **Posted date**: passive lots dated from "Posted N days/hours ago" (`postedAgo`, approximate) instead of when seen. **🏝️ Check TP lists multi-quantity lots of the one item** as "X NP each ×N" (badge vs per-item price); they are kept OUT of the live rate (Ben agreed: bulk lots price differently). Result carries `multis`, `multiCount`; `tpLotContents` returns `same`.
 
 - 1.25.0 — **Ctrl+click (⌘+click) any item image** (`images.neopets.com/items/`) opens the card; Ben chose Ctrl+click over a hover 🍕 button. Capture-phase click listener with preventDefault/stopImmediatePropagation so the page's own click (item menu, buy, link) never fires; mouseup/mousedown handlers skip it. Name: TP `.item-name-text` in the row → `data-itemname/data-item-name/data-name/alt/title` on img or 2 ancestors → first sensible text node in parent/grandparent. If no name is found, the click is left to the page. **Unverified:** inventory, SDB and shop layouts (Ben to paste DOM if names come out wrong); on Mac, Ctrl+click is a right-click, so ⌘ is used there.
+
+- 1.26.0 — **🍕 tag on TP lot boxes** (browse pages, independent of the passive setting): one item ×N → `🍕 1,700,000 each ×10 · −8% vs ours`; mixed lots → `avg X per item ×N · contents ≈ Y ours (k/n priced)` and the lot's % vs contents when every item is priced. `tagLotBox()` inserts `.pbp-lot-tag` after the Instant Buy row (else under the wishlist); `box.dataset.pbpTag` = lot number so Vue box reuse retags. Single-item, qty-1 lots get no tag (possible next step: % vs ours on those too). `getPriceLog()` now memoised for 2 s (one GM read per scan).
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.

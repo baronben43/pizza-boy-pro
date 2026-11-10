@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.25.0
+// @version      1.26.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -1097,13 +1097,18 @@
     } catch (e) { console.warn('[PBP Quick Lookup] price list move:', e); }
   })();
 
+  // Short memo: the TP lot tags ask for many items in one scan
+  let priceLogMemo = null, priceLogMemoAt = 0;
   function getPriceLog() {
+    if (priceLogMemo && Date.now() - priceLogMemoAt < 2000) return priceLogMemo;
+    let out = { v: 1, items: {} };
     try {
       const raw = GM_getValue(PRICE_LOG_KEY, null);
       const l = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (l && l.items) return l;
+      if (l && l.items) out = l;
     } catch {}
-    return { v: 1, items: {} };
+    priceLogMemo = out; priceLogMemoAt = Date.now();
+    return out;
   }
   function savePriceLog(log) {
     const keys = Object.keys(log.items);
@@ -1111,6 +1116,7 @@
       keys.sort((a, b) => (log.items[b].u || 0) - (log.items[a].u || 0));
       for (const k of keys.slice(PRICE_MAX_ITEMS)) delete log.items[k];
     }
+    priceLogMemo = log; priceLogMemoAt = Date.now();
     try { GM_setValue(PRICE_LOG_KEY, JSON.stringify(log)); return true; }
     catch (e) { console.warn('[PBP Quick Lookup] Could not save price list:', e); return false; }
   }
@@ -1648,13 +1654,18 @@
 
   function scanTPPage() {
     const set = getPriceSettings();
-    if (!set.passive || !tpBrowseView()) return;
+    if (!tpBrowseView()) return;
     const out = [];
     for (const box of document.querySelectorAll('.tp-border-frame')) {
       const m = clean(box.textContent).match(/\bLot\s*#?\s*(\d{3,12})/i);
-      if (!m || box.dataset.pbpLot === m[1]) continue;
-      box.dataset.pbpLot = m[1];
+      if (!m) continue;
+      const tagged = box.dataset.pbpTag === m[1];
+      const seen = box.dataset.pbpLot === m[1];
+      if (tagged && (seen || !set.passive)) continue;
       const lot = parseLotBox(box, m[1]);
+      if (!tagged) { box.dataset.pbpTag = m[1]; try { tagLotBox(box, lot); } catch (e) { console.warn('[PBP Quick Lookup] lot tag:', e); } }
+      if (!set.passive || seen) continue;
+      box.dataset.pbpLot = m[1];
       if (lot.items.length !== 1) continue;            // one item type only
       const it = lot.items[0];
       const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
@@ -1664,6 +1675,60 @@
       out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty, t: lot.posted || 0 });
     }
     if (out.length) recordPrices(out);
+  }
+
+  // ── 1.26.0: per-item price tag on TP lot boxes (several items, or mixed lots) ──
+  // One item ×N → "🍕 1,700,000 each ×10" (+ % vs ours). Mixed → "avg X per item ×N" and,
+  // where ours knows the contents, "contents ≈ Y (ours)" with the lot's % vs that. No requests.
+  function tagLotBox(box, lot) {
+    box.querySelectorAll('.pbp-lot-tag').forEach(el => el.remove());
+    const qty = lot.items.reduce((s, it) => s + it.qty, 0);
+    if (!lot.items.length || qty < 2) return;
+    const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
+    const pct = (a, b) => { const v = Math.round((a - b) / b * 100); return `<span class="pbp-lt-pct ${v < 0 ? 'under' : v > 0 ? 'over' : ''}">${v > 0 ? '+' : ''}${v}%</span>`; };
+    let html;
+    if (lot.items.length === 1) {
+      if (!price) return;
+      const each = Math.round(price / qty);
+      const o = ourPrice(lot.items[0].name).price;
+      html = `🍕 <b>${formatNP(each)}</b> each ×${qty}${o ? ` · ${pct(each, o)} vs ours` : ''}`;
+    } else {
+      const bits = [];
+      if (price) bits.push(`avg <b>${formatNP(Math.round(price / qty))}</b> per item ×${qty}`);
+      else bits.push(`${qty} items`);
+      let val = 0, known = 0;
+      for (const it of lot.items) {
+        const o = ourPrice(it.name).price;
+        if (o) { val += o * it.qty; known++; }
+      }
+      if (known) {
+        const part = known < lot.items.length ? ` <span class="pbp-lt-dim">(${known}/${lot.items.length} priced)</span>` : '';
+        bits.push(`contents ≈ <b>${shortNP(val)}</b> ours${part}${price && known === lot.items.length ? ' · ' + pct(price, val) : ''}`);
+      }
+      html = '🍕 ' + bits.join(' · ');
+    }
+    const tag = document.createElement('div');
+    tag.className = 'pbp-lot-tag';
+    tag.innerHTML = html;
+    // Under the Instant Buy row if there is one, else under the wishlist
+    let anchor = null;
+    for (const p of box.querySelectorAll('p')) {
+      if (!p.closest('button') && clean(p.textContent).toLowerCase() === 'instant buy') { anchor = p.parentElement; break; }
+    }
+    if (!anchor) { const w = box.querySelector('.wishlist-text'); anchor = w && w.parentElement; }
+    if (anchor) anchor.insertAdjacentElement('afterend', tag);
+  }
+  if (ON_TP) {
+    const st = document.createElement('style');
+    st.textContent = `
+      .pbp-lot-tag { margin: 6px 12px 0; padding: 4px 8px; border-radius: 6px; background: #2b2b2b; color: #f2e6c8;
+        font: 12px/1.35 Verdana, sans-serif; text-align: center; }
+      .pbp-lot-tag b { color: #e8a800; }
+      .pbp-lot-tag .pbp-lt-dim { color: #999; }
+      .pbp-lot-tag .pbp-lt-pct { font-weight: bold; }
+      .pbp-lot-tag .pbp-lt-pct.under { color: #5fc48a; }
+      .pbp-lot-tag .pbp-lt-pct.over { color: #ff8a7a; }`;
+    document.head.appendChild(st);
   }
 
   if (ON_TP) {
