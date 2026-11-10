@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.20.1
+// @version      1.21.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -671,6 +671,8 @@
     #idb-tooltip .idb-ours-body { flex: 1; }
     #idb-tooltip .idb-ours-body b { color: #ffffff; }
     #idb-tooltip .idb-ours-dim { color: #888888; }
+    #idb-tooltip .idb-seller-masked { color: #888888; cursor: help; }
+    #idb-tooltip .idb-seller-guess { color: #999999; margin-right: 1px; cursor: help; }
     #idb-tooltip .idb-ours-thin { color: #999999; border-bottom: 1px dotted #777777; cursor: help; }
     #idb-tooltip .idb-ours-set {
       background: none;
@@ -876,7 +878,7 @@
       priceHtml = `<div class="idb-price-row">
            <span class="idb-price">${formatNP(price)}</span>
            <span class="idb-np">NP</span>
-           ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours</span>` : ''}
+           ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours${ours.price != null && ours.method ? ' · ' + OURS_METHOD[ours.method] : ''}</span>` : ''}
          </div>
          ${useOurs && !oursOnly ? `<div class="idb-meta">itemdb ${idbPrice ? formatNP(idbPrice) + ' NP' : '—'}</div>` : ''}
          ${oursOnly && ours.price == null ? `<div class="idb-meta">older than ${set.days} days</div>` : ''}`;
@@ -1155,19 +1157,50 @@
     return { price: null, weight: 0 };
   }
 
+  // 1.21.0 — which price we trust, in order:
+  //   live : a 🏝️ Check TP in the last few minutes where every priced single lot was instant buy
+  //          → the cheapest IB (skipping one lowball >25% under the next) is the going rate
+  //   sold : at least minN sold prices (your sales + sold auctions) → their median
+  //   asks : otherwise the 25th percentile of all asks (IB + clear wishlist asks). The cheap
+  //          end, because overpriced lots sit unsold while the cheap ones get bought.
+  const OURS_METHOD = { live: 'live TP', sold: 'sold', asks: 'low asks' };
+  const OURS_METHOD_TIP = {
+    live: 'Cheapest instant buy from your Trading Post check just now (every priced lot was instant buy)',
+    sold: 'Median of recent sold prices (your sales and sold auctions)',
+    asks: 'Cheap end (25th percentile) of recent asking prices, instant buy and wishlist'
+  };
+  function lowQuartile(nums) {
+    const a = nums.slice().sort((x, y) => x - y);
+    return a.length ? a[Math.max(0, Math.ceil(a.length * 0.25) - 1)] : null;
+  }
+  function pickOurPrice(pool, minN) {
+    const sold = pool.filter(isSold);
+    if (sold.length && sold.length >= minN) return { price: wMedian(sold).price, method: 'sold' };
+    const asks = pool.filter(e => !isSold(e)).map(e => e.p);
+    if (asks.length) return { price: lowQuartile(asks), method: 'asks' };
+    if (sold.length) return { price: wMedian(sold).price, method: 'sold' };
+    return { price: null, method: null };
+  }
+  function liveTPRate(name) {
+    const c = tpCache.get(String(name).toLowerCase());
+    return c && Date.now() - c.ts < TP_CACHE_TTL && c.result.live ? c.result.live : null;
+  }
+
   function ourPrice(name, set = getPriceSettings()) {
     const all = ourEntries(name);
-    const cleanAll = all;
     const since = Date.now() - set.days * 86400000;
-    const pool = cleanAll.filter(e => e.t >= since);
-    const recent = wMedian(pool);
+    const pool = all.filter(e => e.t >= since);
+    const weight = wMedian(pool).weight;
+    const live = liveTPRate(name);
+    const pick = live ? { price: live.price, method: 'live' } : pickOurPrice(pool, set.minN);
     return {
-      price: recent.price,
-      weight: recent.weight,
+      price: pick.price,
+      method: pick.method,
+      weight,
       n: pool.length,
       sold: pool.filter(isSold).length,
-      enough: recent.price != null && recent.weight >= set.minN,
-      oldPrice: cleanAll.length ? wMedian(cleanAll).price : null,   // fallback for Ours only
+      enough: pick.price != null && (pick.method === 'live' || weight >= set.minN),
+      oldPrice: all.length ? pickOurPrice(all, set.minN).price : null,   // fallback for Ours only
       total: all.length,
       last: all.length ? all[all.length - 1].t : null
     };
@@ -1184,13 +1217,16 @@
 
   function renderOursLine(o, set, using, only) {
     let body;
-    if (!o.total) {
+    const how = o.method ? ` <span class="idb-ours-dim" title="${OURS_METHOD_TIP[o.method]}">${OURS_METHOD[o.method]}</span>` : '';
+    if (o.method === 'live' && !o.total) {
+      body = `<b>${shortNP(o.price)}</b>${how}`;
+    } else if (!o.total) {
       body = `<span class="idb-ours-dim">nothing saved yet</span>`;
     } else if (o.price == null) {
       body = `<span class="idb-ours-dim">none in the last ${set.days}d · ${o.total} older · last ${agoMs(o.last)}</span>`;
     } else {
       const thin = (o.enough || only) ? '' : ` · <span class="idb-ours-thin" title="Ours first uses our price once it has ${set.minN} (sold counts double) within ${set.days} days">${o.weight}/${set.minN}</span>`;
-      body = `<b>${shortNP(o.price)}</b> · ${o.n} seen${o.sold ? ` (${o.sold} sold)` : ''} · last ${agoMs(o.last)}${thin}`;
+      body = `<b>${shortNP(o.price)}</b>${how} · ${o.n} seen${o.sold ? ` (${o.sold} sold)` : ''} · last ${agoMs(o.last)}${thin}`;
     }
     return `
       <div class="idb-ours-line${using ? ' using' : ''}">
@@ -1249,13 +1285,26 @@
 
   // Update just the 🍕 Ours line after new prices were saved (the main price
   // switches over on the next lookup)
-  function refreshOursLine(name) {
-    const line = getCard().querySelector('.idb-ours-line');
-    if (!line || line.classList.contains('using')) return;
+  // 1.21.0: when ours is already the card's price, the main price updates in place too.
+  // canSwitch: after a Check TP, ours may now qualify → redraw the card so it takes over.
+  function refreshOursLine(name, canSwitch) {
+    const card = getCard();
+    const line = card.querySelector('.idb-ours-line');
+    if (!line) return;
     const set = getPriceSettings();
-    line.outerHTML = renderOursLine(ourPrice(name, set), set, false, /Ours only/.test(line.textContent));
-    const btn = getCard().querySelector('.idb-ours-set');
+    const o = ourPrice(name, set);
+    const using = line.classList.contains('using');
+    const only = /Ours only/.test(line.textContent);
+    if (canSwitch && !using && !only && set.mode === 'ours-first' && o.enough) { relookup(name); return; }
+    line.outerHTML = renderOursLine(o, set, using, only);
+    const btn = card.querySelector('.idb-ours-set');
     if (btn) btn.addEventListener('click', () => toggleOursForm(name));
+    if ((using || only) && o.price != null) {
+      const px = card.querySelector('.idb-price');
+      if (px) px.textContent = formatNP(o.price);
+      const tag = card.querySelector('.idb-src-tag');
+      if (tag && o.method) tag.textContent = 'ours · ' + OURS_METHOD[o.method];
+    }
   }
 
   // Redraw the card for this item after a settings change (keeps it pinned in place)
@@ -1928,8 +1977,8 @@
     let saved = 0;
     try { saved = recordTPLots(lots, itemName); } catch (e) { console.warn('[PBP Quick Lookup] price list:', e); }
 
-    const ib = lots
-      .map(l => tpLotInfo(l, itemName))
+    const infos = lots.map(l => tpLotInfo(l, itemName));
+    const ib = infos
       .filter(l => l.price > 0)
       .sort((a, b) => a.price - b.price);
 
@@ -1937,7 +1986,17 @@
     for (const l of ib) l.firstSeen = seenMap[l.lotId] || null;
 
     const singles = ib.filter(l => l.single);
+    // Going rate: only when every priced single lot is instant buy (no wishlist-only asks)
+    const wishOnly = infos.filter(l => !(l.price > 0) && l.single && askPrice(l.wishlist) > 0).length;
+    let live = null;
+    if (singles.length && !wishOnly) {
+      const lowball = singles.length > 1 && singles[0].price < singles[1].price * 0.75;
+      live = { price: (lowball ? singles[1] : singles[0]).price, n: singles.length, skipped: lowball };
+    }
+    const owners = [...new Set(infos.map(l => l.owner).filter(o => o && !o.includes('*')))];
     const result = {
+      live,
+      owners,
       anyDated: ib.some(l => l.listedAt),
       totalLots: lots.length,
       ibCount: ib.length,
@@ -1963,19 +2022,27 @@
 
   // Seller name → profile, plus quick links to their trades and auctions.
   // All open in new tabs.
+  // Sellers seen on this item's Trading Post check — used to fill in itemdb's hidden names
+  let knownSellers = [];
   function sellerLinks(owner) {
     if (!owner) return '';
+    if (owner.includes('*')) {
+      // itemdb hides names as "tay***": link only if exactly one seller on the card matches
+      const pre = owner.split('*')[0].toLowerCase();
+      const hits = pre ? knownSellers.filter(n => n.toLowerCase().startsWith(pre)) : [];
+      if (hits.length !== 1) return `<span class="idb-seller-masked" title="itemdb hides this seller's name">${escHtml(owner)}</span>`;
+      return `<span class="idb-seller-guess" title="itemdb shows ${escHtml(owner)} — matched to ${escHtml(hits[0])} from your Trading Post check">≈</span>` + sellerLinks(hits[0]);
+    }
     const u = encodeURIComponent(owner);
     const profile  = `https://www.neopets.com/userlookup.phtml?user=${u}`;
     // TP is a Vue SPA that reads its search from the hash, not the query string.
     const trades   = `https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=owner&search_string=${u}`;
     const auctions = `https://www.neopets.com/genie.phtml?type=find_user&auction_username=${u}`;
     const mail     = `https://www.neopets.com/neomessages.phtml?type=send&recipient=${u}`;
-    const masked   = owner.includes('*'); // itemdb hides some names — can't Neomail those
     return `<a class="idb-seller" href="${profile}" target="_blank" rel="noopener" title="${escHtml(owner)}'s profile">${escHtml(owner)}</a>`
          + `<a class="idb-seller-ico" href="${trades}" target="_blank" rel="noopener" title="${escHtml(owner)}'s Trading Post lots">🏝️</a>`
          + `<a class="idb-seller-ico" href="${auctions}" target="_blank" rel="noopener" title="${escHtml(owner)}'s auctions">🔨</a>`
-         + (masked ? '' : `<a class="idb-seller-ico" href="${mail}" target="_blank" rel="noopener" title="Neomail ${escHtml(owner)}">✉️</a>`);
+         + `<a class="idb-seller-ico" href="${mail}" target="_blank" rel="noopener" title="Neomail ${escHtml(owner)}">✉️</a>`;
   }
 
   // "-18%" badge vs the itemdb price. Green = cheaper than itemdb.
@@ -2075,7 +2142,7 @@
     const savedNote = r.saved
       ? `<div class="idb-tp-note">🍕 ${r.saved} new price${r.saved === 1 ? '' : 's'} saved to ours</div>` : '';
     live.innerHTML = `<div class="idb-tp-label">Trading Post</div>${body}${savedNote}`;
-    if (r.saved) refreshOursLine(itemName);
+    if (r.saved || r.live) refreshOursLine(itemName, true);
     live.querySelectorAll('.idb-tp-watch').forEach(btn => {
       btn.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -2278,6 +2345,8 @@
       const live = getCard().querySelector('.idb-hist');
       if (!live || live.dataset.item !== itemName) return;
       if (saved) refreshOursLine(itemName);
+      const tpc = tpCache.get(itemName.toLowerCase());
+      knownSellers = tpc && tpc.result.owners ? tpc.result.owners : [];
       live.innerHTML = (saved ? renderOurHistory(itemName) : oursHist) +
         renderAuctions(h.auctions, idbPrice) +
         renderTrades(h.trades, itemName, idbPrice) +

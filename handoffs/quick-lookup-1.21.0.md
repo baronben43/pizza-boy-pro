@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.20.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.21.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -17,6 +17,13 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 - 1.20.0 — graph hover: both 📜 History sparklines (🍕 Our prices and itemdb 📈 Price history) snap to the nearest point by date and show a readout with price and date. Ours adds kind (coloured), ×qty and time; itemdb adds "inflated". Clicking an Ours point from a TP lot opens that lot search. Built by `sparkWrap()` (points JSON in `data-spark`) plus delegated mousemove/mouseleave/click on the tooltip. No extra requests.
 
 - 1.20.1 — ✉️ Neomail link after 🏝️ 🔨 in `sellerLinks()` (Check TP, History auctions/trades); skipped for itemdb-masked names (contain `*`).
+
+- 1.21.0 — our price picks a method, shown as a tag ("ours · live TP / sold / low asks"):
+  1. **live TP**: a 🏝️ Check TP within the 5-min cache where every priced single lot is IB (no wishlist-only single lots) → cheapest IB; the cheapest is skipped if >25% under the next. Stored as `result.live` in `tpCache`.
+  2. **sold**: ≥ minN sold prices (your sales + `auc`) in `days` → weighted median of those.
+  3. **low asks**: otherwise 25th percentile of IB + wishlist asks (Ben: wishlists must count, esp. 20m+ items where IB is rare).
+  Old method (weighted median of everything) overpriced: overpriced lots sit unsold, so all-asks median ≈ middle of the asking range (Void Paint Brush: 1.4m vs live 1.1m). `refreshOursLine(name, canSwitch)` now updates the main price in place when ours is in use, and after Check TP redraws the card if ours newly qualifies.
+  Hidden itemdb names (`tay***`): grey text, no links; if the prefix matches exactly one owner from this item's Check TP (`result.owners` → `knownSellers`), shows `≈fullname` with all links. Partial masks were never handled before (the Tracker only greys fully masked `*****`).
 
 ## Storage
 - `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
