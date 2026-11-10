@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.18.0
+// @version      1.19.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -1028,10 +1028,12 @@
   //     when the price per item is at or above the threshold (default 1m)
   //   • 🏝️ Check TP saves the one-item lots on the page it already fetched (any price)
   //   • your own sales are read from the Tracker's holdings snapshot (read-only)
-  // Auctions are left to itemdb's auction history (📜 History).
+  //   • 📜 History saves the sold auctions itemdb already returned (no-bid and
+  //     Neofriends-only auctions left out). Auctions are never fetched just for this.
   //
   // Tampermonkey storage (GM) 'pbp_price_log' = { v: 1, items: { key: { name, u, e: [entry] } } }
-  //   entry = { p: NP per item, t: ms saved, k: 'ib'|'ask', id: lot id, q: qty }
+  //   entry = { p: NP per item, t: ms (saved, or auction date), k: 'ib'|'ask'|'auc', id: lot/auction id, q: qty }
+  // Sold prices (your sales, auctions) count double.
   // Settings live in localStorage.pbp_price_settings.
   const PRICE_LOG_KEY = 'pbp_price_log';
   const PRICE_SET_KEY = 'pbp_price_settings';
@@ -1094,10 +1096,11 @@
       const key = itemKey(x.name);
       const rec = log.items[key] || (log.items[key] = { name: clean(x.name), u: now, e: [] });
       if (x.id && rec.e.some(e => e.id === String(x.id))) continue;
-      const e = { p: Math.round(x.p), t: now, k: x.k === 'ask' ? 'ask' : 'ib' };
+      const e = { p: Math.round(x.p), t: x.t > 0 ? x.t : now, k: ['ask', 'auc'].includes(x.k) ? x.k : 'ib' };
       if (x.id) e.id = String(x.id);
       if (x.q > 1) e.q = x.q;
       rec.e.push(e);
+      if (e.t < now) rec.e.sort((a, b) => a.t - b.t);   // auction dates can be older
       if (rec.e.length > PRICE_MAX_PER_ITEM) rec.e = rec.e.slice(-PRICE_MAX_PER_ITEM);
       rec.u = now;
       added++;
@@ -1123,9 +1126,11 @@
     return saved.concat(sold).sort((a, b) => a.t - b.t);
   }
 
-  // Weighted median: sold prices count double
+  const isSold = e => e.k === 'sold' || e.k === 'auc';
+
+  // Weighted median: sold prices (your sales, auctions) count double
   function wMedian(pool) {
-    const w = pool.map(e => ({ p: e.p, wt: e.k === 'sold' ? 2 : 1 })).sort((a, b) => a.p - b.p);
+    const w = pool.map(e => ({ p: e.p, wt: isSold(e) ? 2 : 1 })).sort((a, b) => a.p - b.p);
     const total = w.reduce((s, x) => s + x.wt, 0);
     let acc = 0;
     for (const x of w) { acc += x.wt; if (acc >= total / 2) return { price: x.p, weight: total }; }
@@ -1142,7 +1147,7 @@
       price: recent.price,
       weight: recent.weight,
       n: pool.length,
-      sold: pool.filter(e => e.k === 'sold').length,
+      sold: pool.filter(isSold).length,
       enough: recent.price != null && recent.weight >= set.minN,
       oldPrice: cleanAll.length ? wMedian(cleanAll).price : null,   // fallback for Ours only
       total: all.length,
@@ -1246,7 +1251,7 @@
     let html = `<div class="idb-hist-h">🍕 Our prices</div>`;
     const all = ourEntries(name);
     if (!all.length) return html + `<div class="idb-tp-none">Nothing saved yet. Browse the Trading Post, or press 🏝️ Check TP.</div>`;
-    const colour = e => e.k === 'sold' ? '#5fc48a' : e.k === 'ask' ? '#ffd88a' : '#e8a800';
+    const colour = e => e.k === 'sold' ? '#5fc48a' : e.k === 'auc' ? '#7fb5ff' : e.k === 'ask' ? '#ffd88a' : '#e8a800';
     if (all.length >= 2) {
       const W = 264, H = 46, pad = 4;
       const t0 = all[0].t, t1 = all[all.length - 1].t;
@@ -1262,11 +1267,11 @@
           ${dots}
         </svg>
         <div class="idb-tp-note">low ${formatNP(lo)} · high ${formatNP(hi)} · ${all.length} since ${escHtml(new Date(t0).toLocaleDateString())} ·
-          <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#5fc48a">●</span> sold</div>`;
+          <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#7fb5ff">●</span> auction <span style="color:#5fc48a">●</span> your sale</div>`;
     }
-    const kind = e => e.k === 'sold' ? 'your sale' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
+    const kind = e => e.k === 'sold' ? 'your sale' : e.k === 'auc' ? 'auction sold' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
     const rows = all.slice(-8).reverse().map(e => {
-      const lot = e.id
+      const lot = e.id && (e.k === 'ib' || e.k === 'ask')
         ? ` <a href="https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=${TP_LOT_CRITERIA}&search_string=${encodeURIComponent(e.id)}" target="_blank" rel="noopener">#${escHtml(e.id)}</a>`
         : '';
       return `<div class="idb-own-item"><span><b style="color:${colour(e)}">${formatNP(e.p)}</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kind(e)}${lot}</span><span>${agoMs(e.t)}</span></div>`;
@@ -1370,6 +1375,20 @@
       }
       if (!oneType || !qty) continue;
       out.push({ name, p: price / qty, k: ib > 0 ? 'ib' : 'ask', id, q: qty });
+    }
+    return recordPrices(out);
+  }
+
+  // ── 📜 History: save the sold auctions itemdb already returned ──
+  function recordAuctions(itemName, d) {
+    const recent = d && Array.isArray(d.recent) ? d.recent : [];
+    const out = [];
+    for (const a of recent) {
+      const price = Number(a.price) || 0;
+      const t = Date.parse(a.addedAt);
+      if (!a.hasBuyer || a.isNF || !price || !Number.isFinite(t)) continue;
+      const id = pick(a, ['auction_id', 'auctionId', 'auction_number', 'id']);
+      out.push({ name: itemName, p: price, k: 'auc', t, id: 'auc:' + (id != null ? id : `${t}-${price}`) });
     }
     return recordPrices(out);
   }
@@ -2167,9 +2186,12 @@
     refitTooltip();
 
     histFetch(itemName).then(h => {
+      let saved = 0;
+      if (h.auctions.ok) { try { saved = recordAuctions(itemName, h.auctions.v); } catch (e) { console.warn('[PBP Quick Lookup] auctions:', e); } }
       const live = getCard().querySelector('.idb-hist');
       if (!live || live.dataset.item !== itemName) return;
-      live.innerHTML = oursHist +
+      if (saved) refreshOursLine(itemName);
+      live.innerHTML = (saved ? renderOurHistory(itemName) : oursHist) +
         renderAuctions(h.auctions, idbPrice) +
         renderTrades(h.trades, itemName, idbPrice) +
         renderPrices(h.prices);

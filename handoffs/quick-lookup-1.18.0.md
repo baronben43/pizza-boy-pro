@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 — our own price list (handoff)
+# Quick Lookup 1.18.0 / 1.19.0 — our own price list (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -12,10 +12,10 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 - **📜 History** starts with 🍕 Our prices: sparkline (amber IB, light yellow wishlist ask, green sold) and the last 8 entries with lot links.
 - Wishlist asks count only when clear: marked ab/ib/bin, or a wishlist that's nothing but a price ("3.795 million NP"). c/o is ignored. Min 1,000.
 - Highlighting a lot number does **not** save (removed by Ben's choice). It only shows 🏝️ Search TP for lot.
-- Auctions: deliberately not captured. itemdb's auction history covers them (Ben's choice).
+- **1.19.0 — auctions**: when 📜 History loads, sold auctions from itemdb's `/auction` response (`recent[]`: `price`, `hasBuyer`, `isNF`, `addedAt`) are saved as `k:'auc'` with the auction date as `t`, id `auc:<id>` (or `auc:<t>-<price>`). No-bid and NF auctions are skipped. They count double, like your sales. Ben chose save-on-History only: auctions are never fetched just for this, since itemdb meters that endpoint per record. A weekly background fetch was considered and deferred.
 
 ## Storage
-- `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
+- `GM_getValue/GM_setValue('pbp_price_log')` = `{ v:1, items: { key: { name, u, e: [{ p, t, k:'ib'|'ask'|'auc', id, q }] } } }`. 50 entries per item, 5000 items max (least recently updated dropped). The 1.17.0 localStorage copy is migrated once and removed.
 - `localStorage.pbp_price_settings` = `{ mode, minN, days, passive, minPx }`.
 - New grants: `GM_getValue`, `GM_setValue`.
 
