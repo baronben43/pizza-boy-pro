@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.16.0
-// @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), or pop open a keypad calculator
+// @version      1.18.0
+// @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        unsafeWindow
 // @connect      itemdb.com.br
 // ==/UserScript==
@@ -20,6 +22,9 @@
   //   • Highlighting an item asks itemdb only
   //   • The Trading Post is checked when you press 🏝️ Check TP: one page, once
   //   • 🔍 SSW opens the Super Shop Wizard with the name typed in; you press Search
+  //   • 🍕 Our prices: Trading Post lots already on the page you're viewing, and
+  //     lots Check TP already fetched, are saved to your own price list in this
+  //     browser — nothing extra is ever requested
 
   // ─── CONSTANTS ─────────────────────────────────────────────────────────────
   const TOOLTIP_ID = 'idb-tooltip';
@@ -634,6 +639,56 @@
     .idb-calc .idb-calc-key.op   { background: #b07800; }
     .idb-calc .idb-calc-key.eq   { background: #e8a800; color: #2c2c2c; }
     .idb-calc .idb-calc-key.zero { grid-column: span 2; }
+    /* 🍕 Our prices */
+    #idb-tooltip .idb-ours-line {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: #cccccc;
+    }
+    #idb-tooltip .idb-ours-line.using .idb-ours-lbl { color: #7ee2a0; }
+    #idb-tooltip .idb-ours-lbl { font-weight: 700; color: #e8a800; white-space: nowrap; }
+    #idb-tooltip .idb-ours-body { flex: 1; }
+    #idb-tooltip .idb-ours-body b { color: #ffffff; }
+    #idb-tooltip .idb-ours-dim { color: #888888; }
+    #idb-tooltip .idb-ours-thin { color: #999999; border-bottom: 1px dotted #777777; cursor: help; }
+    #idb-tooltip .idb-ours-set {
+      background: none;
+      border: none;
+      color: #888888;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0 2px;
+    }
+    #idb-tooltip .idb-ours-set:hover { color: #ffd88a; }
+    #idb-tooltip .idb-src-tag {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      background: #1f4d2e;
+      color: #7ee2a0;
+      border-radius: 3px;
+      padding: 1px 4px;
+      align-self: center;
+    }
+    #idb-tooltip .idb-ours-mode,
+    #idb-tooltip .idb-ours-num {
+      background: #2c2c2c;
+      color: #ffffff;
+      border: 1px solid #555555;
+      border-radius: 3px;
+      font-size: 11px;
+      padding: 2px 4px;
+    }
+    #idb-tooltip .idb-ours-num { width: 42px; }
+    #idb-tooltip .idb-ours-list { margin-top: 4px; font-size: 11px; color: #aaaaaa; }
+    #idb-tooltip .idb-ours-list a { color: #ffaa00; text-decoration: none; }
+    #idb-tooltip .idb-ours-chk { font-size: 11px; color: #cccccc; cursor: pointer; }
+    #idb-tooltip .idb-ours-num.idb-ours-minpx { width: 52px; }
+    #idb-tooltip .idb-ours-idb { margin-top: 5px; }
   `;
   document.head.appendChild(style);
 
@@ -776,23 +831,41 @@
     }
 
     const name = data.name || itemName;
-    const price = data.price?.value;
+    const idbPrice = data.price?.value;
     const inflated = data.price?.inflated;
+
+    // Price source: itemdb, or our own price list when it has enough recent data
+    const set = getPriceSettings();
+    const ours = ourPrice(name, set);
+    const oursOnly = !!data.oursOnly;
+    const oursPx = oursOnly ? (ours.price != null ? ours.price : ours.oldPrice) : ours.price;
+    const useOurs = oursOnly ? oursPx != null : (set.mode !== 'idb' && ours.enough);
+    const price = useOurs ? oursPx : idbPrice;
     const rarity = data.rarity ? `r${data.rarity}` : '';
     const category = data.category || '';
     const slug = data.slug || encodeURIComponent(name);
     const link = `https://itemdb.com.br/item/${slug}`;
 
-    // A watched item gets a free price snapshot every time it's looked up
-    if (price) recordItemSnap(name, price);
+    // A watched item gets a free price snapshot every time it's looked up (itemdb price)
+    if (idbPrice) recordItemSnap(name, idbPrice);
     const watched = !!getWatch().items[itemKey(name)];
 
-    const priceHtml = price
-      ? `<div class="idb-price-row">
+    let priceHtml;
+    if (oursOnly && !useOurs) {
+      priceHtml = `<div class="idb-meta">No prices of ours for this item yet</div>
+        <button class="idb-ssw-btn idb-ours-idb" type="button" title="Ask itemdb for this one item">Look up on itemdb</button>`;
+    } else if (price) {
+      priceHtml = `<div class="idb-price-row">
            <span class="idb-price">${formatNP(price)}</span>
            <span class="idb-np">NP</span>
-         </div>`
-      : `<div class="idb-meta">No price data available</div>`;
+           ${useOurs ? `<span class="idb-src-tag" title="From our own price list">ours</span>` : ''}
+         </div>
+         ${useOurs && !oursOnly ? `<div class="idb-meta">itemdb ${idbPrice ? formatNP(idbPrice) + ' NP' : '—'}</div>` : ''}
+         ${oursOnly && ours.price == null ? `<div class="idb-meta">older than ${set.days} days</div>` : ''}`;
+    } else {
+      priceHtml = `<div class="idb-meta">No price data available</div>`;
+    }
+    const oursHtml = renderOursLine(ours, set, useOurs && !oursOnly, oursOnly);
 
     const inflatedHtml = inflated
       ? `<div class="idb-inflated">⚠ Inflated Price</div>`
@@ -815,12 +888,14 @@
         ${inflatedHtml}
         ${priceHtml}
         ${metaHtml}
+        ${oursHtml}
         <div class="idb-watch-slot">${renderWatchLine(name, price)}</div>
         ${renderOwned(name, price)}
         <div class="idb-tp-row" data-item="${escHtml(name)}"></div>
         <div class="idb-hist" data-item="${escHtml(name)}" style="display:none;"></div>
         <div class="idb-watch-form"></div>
         <div class="idb-watch-form idb-log-form"></div>
+        <div class="idb-watch-form idb-ours-form"></div>
         <div class="idb-footer">
           <a class="idb-link" href="${link}" target="_blank" rel="noopener">itemdb ↗</a>
           <button class="idb-ssw-btn tp" data-item="${escHtml(name)}" title="Check Trading Post instant-buy lots (one search, only when you press it)">🏝️ Check TP</button>
@@ -844,6 +919,9 @@
     card.querySelector('.idb-ssw-btn.hist').addEventListener('click', () => toggleHistory(name, price));
     card.querySelector('.idb-ssw-btn.watch').addEventListener('click', () => toggleWatchForm(name, price));
     card.querySelector('.idb-ssw-btn.calc').addEventListener('click', () => openCalc());
+    card.querySelector('.idb-ours-set').addEventListener('click', () => toggleOursForm(name));
+    const idbBtn = card.querySelector('.idb-ours-idb');
+    if (idbBtn) idbBtn.addEventListener('click', () => { pinTooltip(); relookup(name, true); });
     const ownToggle = card.querySelector('.idb-own-toggle');
     if (ownToggle) ownToggle.addEventListener('click', () => {
       const row = card.querySelector('.idb-own-row');
@@ -942,6 +1020,398 @@
         <div class="idb-own-foot">${age}</div>
       </div>
     `;
+  }
+
+  // ─── OUR PRICES (our own price list) ───────────────────────────────────────
+  // Built only from things already in front of you — never an extra Neopets request:
+  //   • passive: one-item lots on Trading Post browse pages you're looking at,
+  //     when the price per item is at or above the threshold (default 1m)
+  //   • 🏝️ Check TP saves the one-item lots on the page it already fetched (any price)
+  //   • your own sales are read from the Tracker's holdings snapshot (read-only)
+  // Auctions are left to itemdb's auction history (📜 History).
+  //
+  // Tampermonkey storage (GM) 'pbp_price_log' = { v: 1, items: { key: { name, u, e: [entry] } } }
+  //   entry = { p: NP per item, t: ms saved, k: 'ib'|'ask', id: lot id, q: qty }
+  // Settings live in localStorage.pbp_price_settings.
+  const PRICE_LOG_KEY = 'pbp_price_log';
+  const PRICE_SET_KEY = 'pbp_price_settings';
+  const PRICE_MAX_PER_ITEM = 50;
+  const PRICE_MAX_ITEMS = 5000;
+  const PRICE_DEFAULTS = { mode: 'ours-first', minN: 3, days: 14, passive: true, minPx: 1000000 };
+  const PRICE_MODES = { 'idb': 'itemdb only', 'ours-first': 'Ours first', 'ours-only': 'Ours only' };
+
+  const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+
+  function getPriceSettings() {
+    let s = {};
+    try { s = JSON.parse(localStorage.getItem(PRICE_SET_KEY) || 'null') || {}; } catch {}
+    const out = { ...PRICE_DEFAULTS, ...s };
+    if (!PRICE_MODES[out.mode]) out.mode = PRICE_DEFAULTS.mode;
+    out.minN = Math.max(1, parseInt(out.minN, 10) || PRICE_DEFAULTS.minN);
+    out.days = Math.max(1, parseInt(out.days, 10) || PRICE_DEFAULTS.days);
+    out.passive = out.passive !== false;
+    out.minPx = Math.max(0, parseInt(out.minPx, 10) || 0);
+    return out;
+  }
+  function savePriceSettings(s) { try { localStorage.setItem(PRICE_SET_KEY, JSON.stringify(s)); } catch {} }
+
+  // 1.17.0 kept the list in localStorage (~5 MB cap); move it over once
+  (function migratePriceLog() {
+    try {
+      const old = localStorage.getItem(PRICE_LOG_KEY);
+      if (!old) return;
+      if (!GM_getValue(PRICE_LOG_KEY, null)) GM_setValue(PRICE_LOG_KEY, old);
+      localStorage.removeItem(PRICE_LOG_KEY);
+    } catch (e) { console.warn('[PBP Quick Lookup] price list move:', e); }
+  })();
+
+  function getPriceLog() {
+    try {
+      const raw = GM_getValue(PRICE_LOG_KEY, null);
+      const l = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (l && l.items) return l;
+    } catch {}
+    return { v: 1, items: {} };
+  }
+  function savePriceLog(log) {
+    const keys = Object.keys(log.items);
+    if (keys.length > PRICE_MAX_ITEMS) {
+      keys.sort((a, b) => (log.items[b].u || 0) - (log.items[a].u || 0));
+      for (const k of keys.slice(PRICE_MAX_ITEMS)) delete log.items[k];
+    }
+    try { GM_setValue(PRICE_LOG_KEY, JSON.stringify(log)); return true; }
+    catch (e) { console.warn('[PBP Quick Lookup] Could not save price list:', e); return false; }
+  }
+
+  // list = [{ name, p, k, id, q }] → how many were new (each lot is saved once per item)
+  function recordPrices(list) {
+    if (!list || !list.length) return 0;
+    const log = getPriceLog();
+    const now = Date.now();
+    let added = 0;
+    for (const x of list) {
+      if (!x || !x.name || !(x.p > 0)) continue;
+      const key = itemKey(x.name);
+      const rec = log.items[key] || (log.items[key] = { name: clean(x.name), u: now, e: [] });
+      if (x.id && rec.e.some(e => e.id === String(x.id))) continue;
+      const e = { p: Math.round(x.p), t: now, k: x.k === 'ask' ? 'ask' : 'ib' };
+      if (x.id) e.id = String(x.id);
+      if (x.q > 1) e.q = x.q;
+      rec.e.push(e);
+      if (rec.e.length > PRICE_MAX_PER_ITEM) rec.e = rec.e.slice(-PRICE_MAX_PER_ITEM);
+      rec.u = now;
+      added++;
+    }
+    if (added) savePriceLog(log);
+    return added;
+  }
+
+  function clearItemPrices(name) {
+    const log = getPriceLog();
+    delete log.items[itemKey(name)];
+    savePriceLog(log);
+  }
+
+  // Saved lots + your sales from the Tracker, oldest first
+  function ourEntries(name) {
+    const rec = getPriceLog().items[itemKey(name)];
+    const saved = rec ? rec.e.slice() : [];
+    const h = getHoldings(name);
+    const sold = (h && h.sales ? h.sales : [])
+      .map(s => ({ p: Number(s.soldPrice) || 0, t: Date.parse(s.soldDate) || 0, k: 'sold', q: s.qty || 1 }))
+      .filter(s => s.p > 0 && s.t > 0);
+    return saved.concat(sold).sort((a, b) => a.t - b.t);
+  }
+
+  // Weighted median: sold prices count double
+  function wMedian(pool) {
+    const w = pool.map(e => ({ p: e.p, wt: e.k === 'sold' ? 2 : 1 })).sort((a, b) => a.p - b.p);
+    const total = w.reduce((s, x) => s + x.wt, 0);
+    let acc = 0;
+    for (const x of w) { acc += x.wt; if (acc >= total / 2) return { price: x.p, weight: total }; }
+    return { price: null, weight: 0 };
+  }
+
+  function ourPrice(name, set = getPriceSettings()) {
+    const all = ourEntries(name);
+    const cleanAll = all;
+    const since = Date.now() - set.days * 86400000;
+    const pool = cleanAll.filter(e => e.t >= since);
+    const recent = wMedian(pool);
+    return {
+      price: recent.price,
+      weight: recent.weight,
+      n: pool.length,
+      sold: pool.filter(e => e.k === 'sold').length,
+      enough: recent.price != null && recent.weight >= set.minN,
+      oldPrice: cleanAll.length ? wMedian(cleanAll).price : null,   // fallback for Ours only
+      total: all.length,
+      last: all.length ? all[all.length - 1].t : null
+    };
+  }
+
+  function shortNP(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return +(n / 1e9).toFixed(3) + 'b';
+    if (n >= 1e6) return +(n / 1e6).toFixed(3) + 'm';
+    if (n >= 1e4) return +(n / 1e3).toFixed(1) + 'k';
+    return formatNP(n);
+  }
+  const agoMs = ms => Date.now() - ms < 60000 ? 'just now' : timeAgo(new Date(ms).toISOString());
+
+  function renderOursLine(o, set, using, only) {
+    let body;
+    if (!o.total) {
+      body = `<span class="idb-ours-dim">nothing saved yet</span>`;
+    } else if (o.price == null) {
+      body = `<span class="idb-ours-dim">none in the last ${set.days}d · ${o.total} older · last ${agoMs(o.last)}</span>`;
+    } else {
+      const thin = (o.enough || only) ? '' : ` · <span class="idb-ours-thin" title="Ours first uses our price once it has ${set.minN} (sold counts double) within ${set.days} days">${o.weight}/${set.minN}</span>`;
+      body = `<b>${shortNP(o.price)}</b> · ${o.n} seen${o.sold ? ` (${o.sold} sold)` : ''} · last ${agoMs(o.last)}${thin}`;
+    }
+    return `
+      <div class="idb-ours-line${using ? ' using' : ''}">
+        <span class="idb-ours-lbl">🍕 ${only ? 'Ours only' : 'Ours'}${using ? ' ✓' : ''}</span>
+        <span class="idb-ours-body">${body}</span>
+        <button class="idb-ours-set" type="button" title="Price source settings">⚙</button>
+      </div>`;
+  }
+
+  function toggleOursForm(name) {
+    const card = getCard();
+    const form = card.querySelector('.idb-ours-form');
+    if (!form) return;
+    pinTooltip();
+    if (form.classList.contains('open')) { form.classList.remove('open'); refitTooltip(); return; }
+    const set = getPriceSettings();
+    const log = getPriceLog();
+    const nItems = Object.keys(log.items).length;
+    const nPrices = Object.values(log.items).reduce((s, r) => s + r.e.length, 0);
+    const mine = (log.items[itemKey(name)] || { e: [] }).e.length;
+    form.innerHTML = `
+      <div class="idb-tp-label">Price source</div>
+      <div class="idb-watch-form-row">
+        <select class="idb-ours-mode">
+          ${Object.entries(PRICE_MODES).map(([k, v]) => `<option value="${k}"${k === set.mode ? ' selected' : ''}>${v}</option>`).join('')}
+        </select>
+      </div>
+      <div class="idb-tp-note">Ours first uses our price once we have at least
+        <input class="idb-ours-num idb-ours-minn" type="number" min="1" value="${set.minN}"> prices in the last
+        <input class="idb-ours-num idb-ours-days" type="number" min="1" value="${set.days}"> days. Sold counts double. Ours only never asks itemdb for a price.</div>
+      <div class="idb-watch-form-row">
+        <label class="idb-ours-chk"><input class="idb-ours-passive" type="checkbox"${set.passive ? ' checked' : ''}> Save TP lots I browse</label>
+      </div>
+      <div class="idb-tp-note">One-item lots only, when each item is worth at least
+        <input class="idb-ours-num idb-ours-minpx" type="text" value="${shortNP(set.minPx)}"> NP (e.g. 1m, 500k).</div>
+      <div class="idb-watch-form-row">
+        <button class="idb-ssw-btn watch on idb-ours-save" type="button">Save</button>
+        ${mine ? `<button class="idb-ssw-btn unwatch idb-ours-clear" type="button" title="Delete the ${mine} saved price${mine === 1 ? '' : 's'} for this item">Clear this item</button>` : ''}
+      </div>
+      <div class="idb-tp-note">${formatNP(nPrices)} price${nPrices === 1 ? '' : 's'} saved across ${formatNP(nItems)} item${nItems === 1 ? '' : 's'}</div>`;
+    form.classList.add('open');
+    refitTooltip();
+    form.querySelector('.idb-ours-save').addEventListener('click', () => {
+      savePriceSettings({
+        mode: form.querySelector('.idb-ours-mode').value,
+        minN: parseInt(form.querySelector('.idb-ours-minn').value, 10) || PRICE_DEFAULTS.minN,
+        days: parseInt(form.querySelector('.idb-ours-days').value, 10) || PRICE_DEFAULTS.days,
+        passive: form.querySelector('.idb-ours-passive').checked,
+        minPx: parseNPInput(form.querySelector('.idb-ours-minpx').value, set.minPx)
+      });
+      relookup(name);
+    });
+    const clr = form.querySelector('.idb-ours-clear');
+    if (clr) clr.addEventListener('click', () => { clearItemPrices(name); relookup(name); });
+  }
+
+  // Update just the 🍕 Ours line after new prices were saved (the main price
+  // switches over on the next lookup)
+  function refreshOursLine(name) {
+    const line = getCard().querySelector('.idb-ours-line');
+    if (!line || line.classList.contains('using')) return;
+    const set = getPriceSettings();
+    line.outerHTML = renderOursLine(ourPrice(name, set), set, false, /Ours only/.test(line.textContent));
+    const btn = getCard().querySelector('.idb-ours-set');
+    if (btn) btn.addEventListener('click', () => toggleOursForm(name));
+  }
+
+  // Redraw the card for this item after a settings change (keeps it pinned in place)
+  function relookup(name, forceIdb) {
+    currentQuery = null;
+    fetchPrice(name, lastX, lastY, forceIdb);
+  }
+
+  // 📜 History: our own prices, shown above itemdb's
+  function renderOurHistory(name) {
+    let html = `<div class="idb-hist-h">🍕 Our prices</div>`;
+    const all = ourEntries(name);
+    if (!all.length) return html + `<div class="idb-tp-none">Nothing saved yet. Browse the Trading Post, or press 🏝️ Check TP.</div>`;
+    const colour = e => e.k === 'sold' ? '#5fc48a' : e.k === 'ask' ? '#ffd88a' : '#e8a800';
+    if (all.length >= 2) {
+      const W = 264, H = 46, pad = 4;
+      const t0 = all[0].t, t1 = all[all.length - 1].t;
+      const vals = all.map(e => e.p);
+      const lo = Math.min(...vals), hi = Math.max(...vals);
+      const x = t => pad + (W - 2 * pad) * ((t - t0) / Math.max(1, t1 - t0));
+      const y = v => H - pad - (H - 2 * pad) * ((v - lo) / Math.max(1, hi - lo));
+      const line = all.map(e => `${x(e.t).toFixed(1)},${y(e.p).toFixed(1)}`).join(' ');
+      const dots = all.map(e => `<circle cx="${x(e.t).toFixed(1)}" cy="${y(e.p).toFixed(1)}" r="2.3" fill="${colour(e)}"/>`).join('');
+      html += `
+        <svg class="idb-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          <polyline points="${line}" fill="none" stroke="#e8a800" stroke-opacity="0.45" stroke-width="1.2"/>
+          ${dots}
+        </svg>
+        <div class="idb-tp-note">low ${formatNP(lo)} · high ${formatNP(hi)} · ${all.length} since ${escHtml(new Date(t0).toLocaleDateString())} ·
+          <span style="color:#e8a800">●</span> instant buy <span style="color:#ffd88a">●</span> wishlist <span style="color:#5fc48a">●</span> sold</div>`;
+    }
+    const kind = e => e.k === 'sold' ? 'your sale' : (e.k === 'ask' ? 'wishlist' : 'instant buy');
+    const rows = all.slice(-8).reverse().map(e => {
+      const lot = e.id
+        ? ` <a href="https://www.neopets.com/island/tradingpost.phtml#/?type=browse&criteria=${TP_LOT_CRITERIA}&search_string=${encodeURIComponent(e.id)}" target="_blank" rel="noopener">#${escHtml(e.id)}</a>`
+        : '';
+      return `<div class="idb-own-item"><span><b style="color:${colour(e)}">${formatNP(e.p)}</b>${e.q > 1 ? ` <span class="idb-ours-dim">×${e.q}</span>` : ''} · ${kind(e)}${lot}</span><span>${agoMs(e.t)}</span></div>`;
+    }).join('');
+    return html + `<div class="idb-ours-list">${rows}</div>`;
+  }
+
+  // ── Wishlist asking price (same rules as the Tracker's parseAskPrice) ──
+  const ASK_MULT = { k: 1e3, m: 1e6, mil: 1e6, mill: 1e6, million: 1e6, b: 1e9, bil: 1e9, bill: 1e9, billion: 1e9 };
+  const ASK_RE = /(\d+(?:[.,]\d+)?)\s*(?:(?:-|–|to)\s*(\d+(?:[.,]\d+)?)\s*)?(million|billion|mill|bill|mil|bil|k|m|b)(?![a-z])|(\d{1,3}(?:,\d{3})+|\d{4,})\s*(np)?/gi;
+  const ASK_AB = /\b(?:ab|a\/b|auto\s*-?buy|autobuy|insta(?:nt)?(?:\s*buy)?|bin|buy\s*now|ib)\s*[:=@-]?\s*$/i;
+  const ASK_CO = /\b(?:c\/o|co|current(?:ly)?\s*(?:offer|at)?|offer(?:ed)?|sb|starting\s*bid)\s*[:=@-]?\s*$/i;
+
+  // Only a clear asking price counts: one marked "ab"/"ib"/…, or a wishlist that
+  // is nothing but a price ("3.795 million NP"). Anything else → null.
+  function askPrice(text) {
+    const s = clean(text);
+    if (!s) return null;
+    const found = [];
+    let m;
+    ASK_RE.lastIndex = 0;
+    while ((m = ASK_RE.exec(s))) {
+      let v;
+      if (m[3]) v = parseFloat(String(m[2] || m[1]).replace(',', '.')) * ASK_MULT[m[3].toLowerCase()];
+      else {
+        if (!/,/.test(m[4]) && !m[5]) continue;   // bare number with no comma or NP
+        v = parseInt(m[4].replace(/,/g, ''), 10);
+      }
+      if (!Number.isFinite(v) || v < 1000) continue;
+      const before = s.slice(Math.max(0, m.index - 20), m.index);
+      found.push({ v: Math.round(v), raw: m[0], ab: ASK_AB.test(before), co: ASK_CO.test(before) });
+    }
+    const ab = found.filter(f => f.ab && !f.co);
+    if (ab.length) return Math.max(...ab.map(f => f.v));
+    if (found.length === 1 && !found[0].co) {
+      const rest = s.replace(found[0].raw, '').replace(/\bnp\b|[\s.,:;!~*-]/gi, '');
+      if (rest.length <= 2) return found[0].v;
+    }
+    return null;
+  }
+
+  // "1m", "500k", "1,000,000" → number (fallback if it doesn't parse)
+  function parseNPInput(v, fallback) {
+    const m = clean(v).toLowerCase().replace(/,/g, '').match(/^(\d+(?:\.\d+)?)\s*(k|m|b)?$/);
+    if (!m) return fallback;
+    return Math.round(parseFloat(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]] || 1));
+  }
+
+  // ── Reading a lot box on the page ──
+  // Lot box markup (TP, Nov 2026): .tp-border-frame → "Lot N" in p.text-cafeteria,
+  // item rows with p.item-name-text, wishlist p.wishlist-text, and an
+  // "Instant Buy" row whose sibling p.text-museo-bold holds "3,795,000 NP".
+  function parseLotBox(box, lotNum) {
+    const items = new Map();
+    for (const n of box.querySelectorAll('.item-name-text')) {
+      const name = clean(n.textContent);
+      if (!name) continue;
+      // A quantity badge, if the TP shows one, sits next to the item image
+      const row = n.closest('.flex.gap-4') || (n.parentElement && n.parentElement.parentElement);
+      const badge = row && row.querySelector('.relative');
+      const m = badge && clean(badge.textContent).match(/(\d+)/);
+      const qty = m ? (parseInt(m[1], 10) || 1) : 1;
+      const k = itemKey(name);
+      const cur = items.get(k) || { name, qty: 0 };
+      cur.qty += qty;
+      items.set(k, cur);
+    }
+    let ib = 0;
+    for (const p of box.querySelectorAll('p')) {
+      if (p.closest('button') || clean(p.textContent).toLowerCase() !== 'instant buy') continue;
+      const m = p.parentElement && clean(p.parentElement.textContent).match(/([\d,]+)\s*NP/i);
+      if (m) { ib = parseInt(m[1].replace(/,/g, ''), 10) || 0; if (ib) break; }
+    }
+    const wishEl = box.querySelector('.wishlist-text');
+    return { id: lotNum, items: [...items.values()], ib, wish: wishEl ? clean(wishEl.textContent) : '' };
+  }
+
+  // ── Check TP: save every lot on the page that was already fetched ──
+  // Only lots that are all one item type (we know the item from the search).
+  function recordTPLots(lots, itemName) {
+    const out = [];
+    const target = itemKey(itemName);
+    for (const lot of lots || []) {
+      const ib = Number(lot.instant_buy_amount || 0);
+      const wish = String(pick(lot, ['wishlist', 'wish_list', 'wishList']) || '');
+      const price = ib > 0 ? ib : askPrice(wish);
+      if (!price) continue;
+      const id = String(pick(lot, ['lot_id', 'lotId', 'lot_number', 'id']) || '');
+      const list = pick(lot, ['items', 'lot_items', 'lotItems', 'item_list', 'itemList', 'objects']);
+      let qty = 0, name = itemName, oneType = true;
+      if (Array.isArray(list) && list.length) {
+        for (const it of list) {
+          qty += Number(pick(it, ['quantity', 'qty', 'amount', 'count'])) || 1;
+          const nm = clean(pick(it, ['name', 'item_name', 'itemName', 'obj_name']));
+          if (nm && itemKey(nm) !== target) oneType = false;
+          else if (nm) name = nm;
+        }
+      } else {
+        const n = Number(pick(lot, ['item_count', 'itemCount', 'num_items', 'numItems', 'total_items']));
+        if (n === 1) qty = 1; else continue;   // contents unknown → skip
+      }
+      if (!oneType || !qty) continue;
+      out.push({ name, p: price / qty, k: ib > 0 ? 'ib' : 'ask', id, q: qty });
+    }
+    return recordPrices(out);
+  }
+
+  // ── Passive: save lots already on the Trading Post page ──
+  // The TP is a Vue app that draws lots after load, so a MutationObserver
+  // (debounced) reads new lot boxes. Each box is read once per lot number
+  // (Vue reuses boxes between pages, so the lot number is the marker).
+  // Browse pages only — not Your Trades / offers, so your own lots stay out.
+  const ON_TP = location.pathname.indexOf('/island/tradingpost.phtml') === 0;
+  let scanTimer = null;
+
+  function tpBrowseView() {
+    const t = (location.hash.match(/type=([a-z_-]+)/i) || [])[1];
+    return !t || t.toLowerCase() === 'browse';
+  }
+
+  function scanTPPage() {
+    const set = getPriceSettings();
+    if (!set.passive || !tpBrowseView()) return;
+    const out = [];
+    for (const box of document.querySelectorAll('.tp-border-frame')) {
+      const m = clean(box.textContent).match(/\bLot\s*#?\s*(\d{3,12})/i);
+      if (!m || box.dataset.pbpLot === m[1]) continue;
+      box.dataset.pbpLot = m[1];
+      const lot = parseLotBox(box, m[1]);
+      if (lot.items.length !== 1) continue;            // one item type only
+      const it = lot.items[0];
+      const price = lot.ib > 0 ? lot.ib : askPrice(lot.wish);
+      if (!price) continue;
+      const each = price / it.qty;
+      if (each < set.minPx) continue;
+      out.push({ name: it.name, p: each, k: lot.ib > 0 ? 'ib' : 'ask', id: lot.id, q: it.qty });
+    }
+    if (out.length) recordPrices(out);
+  }
+
+  if (ON_TP) {
+    const kick = () => { clearTimeout(scanTimer); scanTimer = setTimeout(scanTPPage, 600); };
+    new MutationObserver(kick).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('hashchange', kick);
+    kick();
   }
 
   // ─── WATCHLIST (shared with Trading Post Tracker) ──────────────────────────
@@ -1128,9 +1598,18 @@
   }
 
   // ─── FETCH FROM ITEMDB ──────────────────────────────────────────────────────
-  function fetchPrice(itemName, x, y) {
+  function fetchPrice(itemName, x, y, forceIdb) {
     if (currentQuery === itemName) return; // Already fetching this
     currentQuery = itemName;
+
+    // Ours only: no itemdb request — the card is built from our own price list
+    if (!forceIdb && getPriceSettings().mode === 'ours-only') {
+      const rec = getPriceLog().items[itemKey(itemName)];
+      const held = getHoldings(itemName);
+      renderResult({ name: (rec && rec.name) || (held && held.name) || itemName, oursOnly: true }, itemName);
+      showTooltip(x, y);
+      return;
+    }
 
     renderLoading(itemName);
     showTooltip(x, y);
@@ -1345,6 +1824,8 @@
     const data = await tpPostPage(itemName, 1);
     const lots = Array.isArray(data.lots) ? data.lots : [];
     const more = tpHasMore(data, 1);
+    let saved = 0;
+    try { saved = recordTPLots(lots, itemName); } catch (e) { console.warn('[PBP Quick Lookup] price list:', e); }
 
     const ib = lots
       .map(l => tpLotInfo(l, itemName))
@@ -1363,7 +1844,8 @@
       singleCount: singles.length,
       bundleCount: ib.length - singles.length,
       contentsKnown: ib.every(l => l.known),
-      morePages: more === true
+      morePages: more === true,
+      saved
     };
 
     tpCache.set(itemName.toLowerCase(), { ts: Date.now(), result });
@@ -1486,7 +1968,10 @@
       body = `<div class="idb-tp-none">No lots on the Trading Post</div>`;
     }
 
-    live.innerHTML = `<div class="idb-tp-label">Trading Post</div>${body}`;
+    const savedNote = r.saved
+      ? `<div class="idb-tp-note">🍕 ${r.saved} new price${r.saved === 1 ? '' : 's'} saved to ours</div>` : '';
+    live.innerHTML = `<div class="idb-tp-label">Trading Post</div>${body}${savedNote}`;
+    if (r.saved) refreshOursLine(itemName);
     live.querySelectorAll('.idb-tp-watch').forEach(btn => {
       btn.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -1677,13 +2162,14 @@
       return;
     }
     panel.style.display = 'block';
-    panel.innerHTML = `<div class="idb-tp-loading"><div class="idb-spinner"></div>Loading itemdb history…</div>`;
+    const oursHist = renderOurHistory(itemName);
+    panel.innerHTML = oursHist + `<div class="idb-tp-loading"><div class="idb-spinner"></div>Loading itemdb history…</div>`;
     refitTooltip();
 
     histFetch(itemName).then(h => {
       const live = getCard().querySelector('.idb-hist');
       if (!live || live.dataset.item !== itemName) return;
-      live.innerHTML =
+      live.innerHTML = oursHist +
         renderAuctions(h.auctions, idbPrice) +
         renderTrades(h.trades, itemName, idbPrice) +
         renderPrices(h.prices);

@@ -18,6 +18,7 @@ Highlight any item name anywhere on Neopets and a card pops up with:
 - an SSW button that opens the Super Shop Wizard with the name filled in (you press Search)
 - a Watch button for tracking an item's price against a target
 - what you hold and what you paid, if you use the Tracker
+- your own price list: one-item Trading Post lots you browse (1m+ each by default) and lots Check TP fetches are saved in your browser, with no extra requests. A Price source setting (⚙) picks itemdb only, Ours first or Ours only
 - a small calculator
 
 ### Trading Post Tracker
