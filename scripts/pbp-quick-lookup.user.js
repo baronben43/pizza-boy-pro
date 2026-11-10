@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.24.0
+// @version      1.25.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
@@ -2885,8 +2885,59 @@
   }
 
   // ─── SELECTION HANDLER ──────────────────────────────────────────────────────
+  // ─── CTRL+CLICK AN ITEM IMAGE (1.25.0) ─────────────────────────────────────
+  // Ctrl+click (⌘+click on Mac) any item image to look it up — no highlighting needed.
+  // Captured before the page sees it, so it never opens the item menu, buys, or opens a tab.
+  // Name: TP lot rows (.item-name-text), then data-*/alt/title, then the text right by the image.
+  const ITEM_IMG_RE = /images\.neopets\.com\/items\//i;
+  const BAD_NAME_RE = /^(item|items|image|picture|click|x?\d[\d,.]*\s*(np)?|\(?\d+\)?|qty.*|quantity.*)$/i;
+  function itemImgAt(el) {
+    const img = el && el.closest ? el.closest('img') : null;
+    return img && ITEM_IMG_RE.test(img.getAttribute('src') || '') ? img : null;
+  }
+  function okName(t) {
+    t = clean(t);
+    return t && t.length >= MIN_CHARS && t.length <= MAX_CHARS && /[a-z]/i.test(t) && !BAD_NAME_RE.test(t) ? t : '';
+  }
+  function nameForImg(img) {
+    // Trading Post lot row
+    const row = img.closest('.flex.gap-4');
+    const tp = row && row.querySelector('.item-name-text');
+    if (tp && okName(tp.textContent)) return okName(tp.textContent);
+    // Attributes on the image or a wrapping element
+    for (let el = img, i = 0; el && i < 3; el = el.parentElement, i++) {
+      for (const a of ['data-itemname', 'data-item-name', 'data-name', 'alt', 'title']) {
+        const v = okName(el.getAttribute && el.getAttribute(a));
+        if (v) return v;
+      }
+    }
+    // Text next to the image: first sensible line in the parent, then the grandparent
+    for (let el = img.parentElement, i = 0; el && i < 2; el = el.parentElement, i++) {
+      const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+        const v = okName(n.nodeValue);
+        if (v) return v;
+      }
+    }
+    return '';
+  }
+  document.addEventListener('click', function(e) {
+    if (!(e.ctrlKey || e.metaKey) || e.button !== 0 || tooltip.contains(e.target)) return;
+    const img = itemImgAt(e.target);
+    if (!img) return;
+    const name = nameForImg(img);
+    if (!name) return;                       // can't tell the item → leave the click to the page
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    if (isShown()) closeTooltip();
+    currentQuery = null;
+    fetchPrice(name, e.clientX, e.clientY);
+  }, true);
+
   document.addEventListener('mouseup', function(e) {
     if (tooltip.contains(e.target)) return;
+    if ((e.ctrlKey || e.metaKey) && itemImgAt(e.target)) return;   // handled by Ctrl+click
     if (e.target.closest && e.target.closest('.idb-calc')) return; // typing/selecting in a calculator
     // Small delay to let the browser finalise the selection
     setTimeout(() => {
@@ -2918,6 +2969,7 @@
   // Hide when clicking elsewhere (clicks in a calculator leave the card alone)
   document.addEventListener('mousedown', function(e) {
     if (!isShown()) return;
+    if ((e.ctrlKey || e.metaKey) && itemImgAt(e.target)) return;   // Ctrl+click swaps the card itself
     if (e.target.closest && e.target.closest('.idb-calc')) return;
     if (!tooltip.contains(e.target)) {
       if (isPinned()) closeTooltip(); else hideTooltip(100);
