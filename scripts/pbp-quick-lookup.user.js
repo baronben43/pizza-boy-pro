@@ -1,15 +1,18 @@
 // ==UserScript==
 // @name         Pizza Boy Pro – Quick Lookup
 // @namespace    https://pizzaboypro.de/
-// @version      1.27.1
+// @version      1.28.0
 // @description  Highlight any item name on Neopets to see its itemdb price, check Trading Post instant-buy lots vs itemdb on demand, open the SSW with the name filled in, jump to your SDB, log past buys to the Tracker, watch lots and items, see what you own and paid (via the Tracker), build your own price list from the Trading Post lots you see, or pop open a keypad calculator
 // @author       Pizza Boy Pro
 // @match        https://www.neopets.com/*
+// @match        https://itemdb.com.br/*
+// @match        https://www.itemdb.com.br/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
 // @connect      itemdb.com.br
+// @connect      www.neopets.com
 // ==/UserScript==
 
 (function () {
@@ -30,6 +33,9 @@
 
   // ─── CONSTANTS ─────────────────────────────────────────────────────────────
   const TOOLTIP_ID = 'idb-tooltip';
+  // 1.28.0: the card also runs on itemdb.com.br. localStorage there is a different
+  // box from neopets.com's, so anything shared goes through the bridge below.
+  const ON_IDB = /(^|\.)itemdb\.com\.br$/i.test(location.hostname);
   const TP_API_URL = 'https://www.neopets.com/np-templates/ajax/island/tradingpost/tradingpost-list.php';
   const MIN_CHARS = 3;
   const MAX_CHARS = 80;
@@ -926,7 +932,7 @@
           <a class="idb-ssw-btn sw" href="${swUrl}" target="_blank" rel="noopener">🧙 SW</a>
           <a class="idb-ssw-btn ah" href="${ahUrl}" target="_blank" rel="noopener">🔨 AH</a>
           <a class="idb-ssw-btn sdb" href="${sdbUrl}" target="_blank" rel="noopener">🏦 SDB</a>
-          <button class="idb-ssw-btn ssw" data-item="${escHtml(name)}" title="Open the Super Shop Wizard with this name typed in — press Search yourself">🔍 SSW</button>
+          ${ON_IDB ? '' : `<button class="idb-ssw-btn ssw" data-item="${escHtml(name)}" title="Open the Super Shop Wizard with this name typed in — press Search yourself">🔍 SSW</button>`}
           <button class="idb-ssw-btn hist" data-item="${escHtml(name)}" title="Auction, trade and price history from itemdb">📜 History</button>
           <button class="idb-ssw-btn watch${watched ? ' on' : ''}" data-item="${escHtml(name)}" title="Watch this item's price, with an optional target (shows in the Tracker's Watch tab)">👁 ${watched ? 'Watching' : 'Watch'}</button>
           <button class="idb-ssw-btn tracker" data-item="${escHtml(name)}" title="Queue a past purchase for the Tracker — it opens the Add form next time you're on the Trading Post">＋ Log Buy</button>
@@ -937,7 +943,8 @@
 
     // Attach button events after render
     card.querySelector('.idb-ssw-btn.tp').addEventListener('click', () => renderTP(name, price));
-    card.querySelector('.idb-ssw-btn.ssw').addEventListener('click', () => triggerSSW(name));
+    const sswBtn = card.querySelector('.idb-ssw-btn.ssw');
+    if (sswBtn) sswBtn.addEventListener('click', () => triggerSSW(name));
     card.querySelector('.idb-ssw-btn.tracker').addEventListener('click', () => toggleLogForm(name, price));
     card.querySelector('.idb-ssw-btn.hist').addEventListener('click', () => toggleHistory(name, price));
     card.querySelector('.idb-ssw-btn.watch').addEventListener('click', () => toggleWatchForm(name, price));
@@ -959,6 +966,66 @@
     if (cached && Date.now() - cached.ts < TP_CACHE_TTL) showTPResult(name, price, cached.result);
   }
 
+  // ─── ITEMDB BRIDGE (1.28.0) ─────────────────────────────────────────────────
+  // localStorage is per-site, so itemdb.com.br can't see what the Tracker keeps on
+  // neopets.com. GM storage is shared by this script on both sites, so:
+  //   • Tracker holdings (Your Stock): copied localStorage → GM on neopets.com, read-only on itemdb
+  //   • Watchlist: two-way, newest `updated` wins (itemdb edits land on neopets.com at the next sync)
+  //   • Log Buy queue: itemdb holds it in GM; the next neopets.com page moves it to the Tracker inbox
+  //   • Our own settings / TP lot ages: kept in GM on both sites (moved over once from localStorage)
+  // Sync runs on neopets.com only: at load, every 15 s while the tab is visible, and on tab focus.
+  const GM_PFX = 'pbp_bridge:';
+  const INBOX_PENDING = 'pbp_inbox_pending';
+  const BR_HOLDINGS = 'np_tracker_holdings';
+  const BR_WATCH = 'np_tp_watchlist';
+  const BR_INBOX = 'np_tracker_inbox';
+
+  function shareGet(key) {
+    if (ON_IDB) { try { const v = GM_getValue(GM_PFX + key, null); return v == null ? null : v; } catch { return null; } }
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+  function shareSet(key, val) {
+    if (ON_IDB) { GM_setValue(GM_PFX + key, val); return; }
+    localStorage.setItem(key, val);
+  }
+  function ownGet(key) {
+    let v = null;
+    try { v = GM_getValue('pbp_own:' + key, null); } catch {}
+    if (v == null && !ON_IDB) {
+      try { v = localStorage.getItem(key); if (v != null) GM_setValue('pbp_own:' + key, v); } catch {}
+    }
+    return v;
+  }
+  function ownSet(key, val) { GM_setValue('pbp_own:' + key, val); }
+
+  function bridgeSync() {
+    if (ON_IDB) return;
+    try {
+      const h = localStorage.getItem(BR_HOLDINGS);
+      if (h != null && GM_getValue(GM_PFX + BR_HOLDINGS, null) !== h) GM_setValue(GM_PFX + BR_HOLDINGS, h);
+
+      const l = localStorage.getItem(BR_WATCH);
+      const g = GM_getValue(GM_PFX + BR_WATCH, null);
+      if (l !== g) {
+        const stamp = t => { try { return Date.parse(JSON.parse(t).updated) || 0; } catch { return 0; } };
+        const lt = l == null ? -1 : stamp(l), gt = g == null ? -1 : stamp(g);
+        if (g != null && gt > lt) {
+          localStorage.setItem(BR_WATCH, g);
+          document.dispatchEvent(new CustomEvent('pbp-watchlist-changed'));
+        } else if (l != null) GM_setValue(GM_PFX + BR_WATCH, l);
+      }
+
+      const pend = JSON.parse(GM_getValue(INBOX_PENDING, '[]') || '[]');
+      if (Array.isArray(pend) && pend.length) {
+        let cur = [];
+        try { cur = JSON.parse(localStorage.getItem(BR_INBOX) || '[]') || []; } catch {}
+        localStorage.setItem(BR_INBOX, JSON.stringify(cur.concat(pend)));
+        GM_setValue(INBOX_PENDING, '[]');
+        document.dispatchEvent(new CustomEvent('pbp-tracker-inbox'));
+      }
+    } catch (e) { console.warn('[PBP Quick Lookup] bridge sync:', e); }
+  }
+
   // ─── YOUR STOCK (Trading Post Tracker bridge) ──────────────────────────────
   // The Tracker publishes a read-only snapshot of its log to localStorage
   // (GM storage is per-script, so this is the only shared channel). Unsold
@@ -967,7 +1034,7 @@
 
   function getHoldings(itemName) {
     try {
-      const snap = JSON.parse(localStorage.getItem(HOLDINGS_KEY) || 'null');
+      const snap = JSON.parse(shareGet(HOLDINGS_KEY) || 'null');
       if (!snap || !snap.items) return null;
       const rec = snap.items[String(itemName).trim().toLowerCase()];
       return rec ? { ...rec, updated: snap.updated } : null;
@@ -1062,7 +1129,7 @@
   // Tampermonkey storage (GM) 'pbp_price_log' = { v: 1, items: { key: { name, u, e: [entry] } } }
   //   entry = { p: NP per item, t: ms (saved, or auction date), k: 'ib'|'ask'|'auc', id: lot/auction id, q: qty }
   // Sold prices (your sales, auctions) count double.
-  // Settings live in localStorage.pbp_price_settings.
+  // Settings live in GM storage (ownGet/ownSet), so itemdb.com.br sees the same ones.
   const PRICE_LOG_KEY = 'pbp_price_log';
   const PRICE_SET_KEY = 'pbp_price_settings';
   const PRICE_MAX_PER_ITEM = 50;
@@ -1074,7 +1141,7 @@
 
   function getPriceSettings() {
     let s = {};
-    try { s = JSON.parse(localStorage.getItem(PRICE_SET_KEY) || 'null') || {}; } catch {}
+    try { s = JSON.parse(ownGet(PRICE_SET_KEY) || 'null') || {}; } catch {}
     const out = { ...PRICE_DEFAULTS, ...s };
     if (!PRICE_MODES[out.mode]) out.mode = PRICE_DEFAULTS.mode;
     out.minN = Math.max(1, parseInt(out.minN, 10) || PRICE_DEFAULTS.minN);
@@ -1087,7 +1154,7 @@
     }
     return out;
   }
-  function savePriceSettings(s) { try { localStorage.setItem(PRICE_SET_KEY, JSON.stringify(s)); } catch {} }
+  function savePriceSettings(s) { try { ownSet(PRICE_SET_KEY, JSON.stringify(s)); } catch {} }
 
   // 1.17.0 kept the list in localStorage (~5 MB cap); move it over once
   (function migratePriceLog() {
@@ -1920,7 +1987,7 @@
 
   function getWatch() {
     try {
-      const w = JSON.parse(localStorage.getItem(WATCH_KEY) || 'null');
+      const w = JSON.parse(shareGet(WATCH_KEY) || 'null');
       if (w && typeof w === 'object') return { ...w, v: 1, lots: w.lots || {}, items: w.items || {} };
     } catch {}
     return { v: 1, lots: {}, items: {} };
@@ -1928,7 +1995,7 @@
   function saveWatch(w) {
     try {
       w.updated = new Date().toISOString();
-      localStorage.setItem(WATCH_KEY, JSON.stringify(w));
+      shareSet(WATCH_KEY, JSON.stringify(w));
       // Same-tab nudge for the Tracker (storage events only reach other tabs)
       document.dispatchEvent(new CustomEvent('pbp-watchlist-changed'));
       return true;
@@ -2150,26 +2217,51 @@
     return undefined;
   }
 
+  // On itemdb.com.br the Trading Post is cross-site, so the same POST goes through
+  // GM_xmlhttpRequest (Tampermonkey sends your neopets.com cookies with it).
+  function tpGMPost(body) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: TP_API_URL,
+        data: body,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': 'https://www.neopets.com/island/tradingpost.phtml',
+          'Origin': 'https://www.neopets.com'
+        },
+        onload: res => {
+          if (res.status < 200 || res.status >= 300) { reject(new Error('HTTP ' + res.status)); return; }
+          try { resolve(JSON.parse(res.responseText)); } catch (e) { reject(e); }
+        },
+        onerror: () => reject(new Error('network')),
+        ontimeout: () => reject(new Error('timeout'))
+      });
+    });
+  }
+
   function tpPostPage(itemName, page) {
-    return fetch(TP_API_URL, {
+    const body = JSON.stringify({
+      type: 'browse',
+      criteria: 'item_exact',
+      search_string: itemName,
+      sort: 'newest',
+      page: page
+    });
+    const req = ON_IDB ? tpGMPost(body) : fetch(TP_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Requested-With': 'XMLHttpRequest'
       },
       credentials: 'include',
-      body: JSON.stringify({
-        type: 'browse',
-        criteria: 'item_exact',
-        search_string: itemName,
-        sort: 'newest',
-        page: page
-      })
-    })
-      .then(res => {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      })
+      body
+    }).then(res => {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    });
+    return req
       .then(data => {
         if (!data || data.success !== true) throw new Error('success=false');
         return data;
@@ -2216,7 +2308,7 @@
     'date_added', 'added_at', 'start_date', 'timestamp', 'date', 'time'];
   const LOT_DATE_SKIP = /expir|end|updat|modif|last|close|finish/i;
   const LOT_DATE_HINT = /creat|list|post|date|time|added|start|stamp/i;
-  const LOT_SEEN_KEY = 'np_tp_lot_seen';   // localStorage: { lotId: first-seen ms } — fallback only
+  const LOT_SEEN_KEY = 'np_tp_lot_seen';   // GM storage: { lotId: first-seen ms } — fallback only
   const LOT_SEEN_MAX = 4000;
 
   function nstToMs(y, mo, d, h, mi, s) {
@@ -2258,7 +2350,7 @@
   }
 
   function getLotSeen() {
-    try { return JSON.parse(localStorage.getItem(LOT_SEEN_KEY) || '{}') || {}; } catch { return {}; }
+    try { return JSON.parse(ownGet(LOT_SEEN_KEY) || '{}') || {}; } catch { return {}; }
   }
   // Remember when we first saw each lot id; returns the map
   function noteLotsSeen(ids) {
@@ -2271,7 +2363,7 @@
       if (entries.length > LOT_SEEN_MAX) {
         entries = entries.sort((a, b) => b[1] - a[1]).slice(0, LOT_SEEN_MAX);
       }
-      try { localStorage.setItem(LOT_SEEN_KEY, JSON.stringify(Object.fromEntries(entries))); } catch {}
+      try { ownSet(LOT_SEEN_KEY, JSON.stringify(Object.fromEntries(entries))); } catch {}
       return Object.fromEntries(entries);
     }
     return seen;
@@ -2429,7 +2521,7 @@
         if (!live || live.dataset.item !== itemName) return;
         live.innerHTML = `
           <div class="idb-tp-label">Trading Post</div>
-          <div class="idb-tp-err">Couldn't reach the Trading Post.</div>
+          <div class="idb-tp-err">Couldn't reach the Trading Post.${ON_IDB ? ' From itemdb this needs you logged in on neopets.com — try 🏝️ ↗ instead.' : ''}</div>
         `;
         refitTooltip();
       })
@@ -3094,7 +3186,7 @@
       const btn = card.querySelector('.idb-ssw-btn.tracker:not(.idb-log-save)');
       if (btn) {
         btn.textContent = ok ? '✓ Queued for Tracker' : '⚠ Couldn\'t queue';
-        btn.title = ok ? 'The Add form opens pre-filled next time you\'re on the Trading Post' : 'Browser storage unavailable';
+        btn.title = ok ? (ON_IDB ? 'Queued — it reaches the Tracker the next time a neopets.com page is open' : 'The Add form opens pre-filled next time you\'re on the Trading Post') : 'Browser storage unavailable';
       }
       if (ok) { form.classList.remove('open'); refitTooltip(); }
       else if (saveBtn) saveBtn.textContent = '⚠ Failed';
@@ -3108,6 +3200,14 @@
     const payload = [{ item: itemName, price: o.price || null, qty: o.qty || 1, date: o.date || new Date().toISOString(),
                        notes: 'Quick Lookup · logged ' + new Date().toLocaleDateString() }];
     let ok = true;
+    if (ON_IDB) {
+      // itemdb can't reach the Tracker's localStorage — park it; the next neopets.com page moves it over
+      try {
+        const cur = JSON.parse(GM_getValue(INBOX_PENDING, '[]') || '[]');
+        GM_setValue(INBOX_PENDING, JSON.stringify((Array.isArray(cur) ? cur : []).concat(payload)));
+      } catch { ok = false; }
+      return ok;
+    }
     try {
       const existing = JSON.parse(localStorage.getItem(TRACKER_INBOX_KEY) || '[]');
       localStorage.setItem(TRACKER_INBOX_KEY, JSON.stringify(existing.concat(payload)));
@@ -3124,10 +3224,15 @@
   // Captured before the page sees it, so it never opens the item menu, buys, or opens a tab.
   // Name: TP lot rows (.item-name-text), then data-*/alt/title, then the text right by the image.
   const ITEM_IMG_RE = /images\.neopets\.com\/items\//i;
+  function isItemSrc(src) {
+    src = String(src || '');
+    if (ITEM_IMG_RE.test(src)) return true;
+    try { return ITEM_IMG_RE.test(decodeURIComponent(src)); } catch { return false; }   // itemdb: /_next/image?url=https%3A%2F%2Fimages.neopets.com%2Fitems%2F…
+  }
   const BAD_NAME_RE = /^(item|items|image|picture|click|x?\d[\d,.]*\s*(np)?|\(?\d+\)?|qty.*|quantity.*)$/i;
   function itemImgAt(el) {
     const img = el && el.closest ? el.closest('img') : null;
-    return img && ITEM_IMG_RE.test(img.getAttribute('src') || '') ? img : null;
+    return img && isItemSrc(img.getAttribute('src')) ? img : null;
   }
   function okName(t) {
     t = clean(t);
@@ -3165,7 +3270,7 @@
     const own = okName(el.textContent);
     if (!own || el.children.length > 3) return '';
     for (let a = el.parentElement, i = 0; a && i < 3; a = a.parentElement, i++) {
-      const imgs = [...a.querySelectorAll('img')].filter(im => ITEM_IMG_RE.test(im.getAttribute('src') || ''));
+      const imgs = [...a.querySelectorAll('img')].filter(im => isItemSrc(im.getAttribute('src')));
       if (imgs.length) return imgs.length <= 4 ? own : '';
     }
     return '';
@@ -3232,6 +3337,13 @@
 
   // ─── UTILITIES ──────────────────────────────────────────────────────────────
   function formatNP(n) { return Number(n).toLocaleString('en-US'); }
+
+  // ─── START THE BRIDGE ───────────────────────────────────────────────────────
+  if (!ON_IDB) {
+    bridgeSync();
+    setInterval(() => { if (document.visibilityState === 'visible') bridgeSync(); }, 15000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') bridgeSync(); });
+  }
   function escHtml(s) {
     return String(s)
       .replace(/&/g,'&amp;')

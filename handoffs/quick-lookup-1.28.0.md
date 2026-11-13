@@ -1,4 +1,4 @@
-# Quick Lookup 1.18.0 – 1.27.1 — our own price list (handoff)
+# Quick Lookup 1.18.0 – 1.28.0 — our own price list, now also on itemdb (handoff)
 
 Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov 2026.
 
@@ -62,3 +62,23 @@ Script: `scripts/pbp-quick-lookup.user.js` (public build, also Ben's build). Nov
 ## Not built / ideas
 - Exporting or importing the price list.
 - Tracker using our prices: deferred until the Tracker cleanup (Ben's choice: Quick Lookup only for now).
+
+## 1.28.0 — card on itemdb.com.br (Nov 2026)
+Ben asked for the tooltip on itemdb.com.br too, and chose the **full card with a bridge** (not price-only).
+- `@match` adds `https://itemdb.com.br/*` and `https://www.itemdb.com.br/*`; `@connect www.neopets.com` added. `ON_IDB` flag near the top.
+- Highlight and Ctrl+click both work there. Image check `isItemSrc()` also decodes the src, since Next.js serves images as `/_next/image?url=https%3A%2F%2Fimages.neopets.com%2Fitems%2F…`.
+- **Bridge** (localStorage is per-site, GM storage is shared across both sites for this script):
+  - Holdings (Your Stock): neopets.com copies `np_tracker_holdings` → GM `pbp_bridge:…`; itemdb reads it (read-only).
+  - Watchlist `np_tp_watchlist`: two-way, newest `updated` wins, local wins ties. itemdb edits reach localStorage (and the Tracker) at the next neopets.com sync.
+  - ＋ Log Buy on itemdb: queued in GM `pbp_inbox_pending`; the next neopets.com page appends it to `np_tracker_inbox`.
+  - Settings (`pbp_price_settings`) and TP lot ages (`np_tp_lot_seen`) moved to GM on both sites (`ownGet/ownSet`, one-time migration from localStorage). Neither is read by the Tracker.
+  - `bridgeSync()` runs on neopets.com only: at load, every 15 s while the tab is visible, on tab focus.
+- **Check TP on itemdb**: same POST via `GM_xmlhttpRequest` (`tpGMPost`) with Referer/Origin set to neopets.com. Error text points to neopets.com login.
+- The 🔍 SSW button is hidden on itemdb (the 🧙 SW link covers it). Passive TP capture is untouched (`ON_TP` is false there).
+- Checked: `node --check`, plus a jsdom load on both hosts (card created, Ctrl+click on a Next-proxied image fires the itemdb lookup, holdings mirrored to GM).
+
+### Unverified on the live site
+1. That Tampermonkey in Firefox sends neopets.com cookies on the cross-site Check TP POST, and that the TP accepts the Referer/Origin override. If it errors, the card says so; fallback is the ↗ link.
+2. itemdb's real item-card markup: the name for Ctrl+click comes from `alt`/`title`/nearby text. If a card gives no name, ask Ben for a paste of one card's HTML.
+3. That itemdb sends no CSP that blocks the injected `<style>`.
+4. itemdb lookups fire for any highlighted 3–80 char text, as on Neopets, so highlighting random text there makes lookups that 404.
